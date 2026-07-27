@@ -1,0 +1,17 @@
+# Internal working docs stay local: build.md, plan.md, CLAUDE.md.
+# README.md is the only markdown that ships.
+*.md
+!README.md
+
+node_modules/
+artifacts/
+cache/
+types/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+app/.next/
+app/node_modules/
+deployments/localhost.json
