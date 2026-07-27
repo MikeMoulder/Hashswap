@@ -1,0 +1,316 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ================================================================
+   HashSwap — red / black / white
+   Red is the scarcest element on the page. It marks one action and
+   one idea at a time; everywhere else the page is monochrome. That
+   restraint is what makes it read as an instrument rather than an app.
+   ================================================================ */
+
+:root {
+  --ink: #08080a;
+  --ink-1: #0e0e11;
+  --ink-2: #141418;
+  --ink-3: #1c1c21;
+
+  --paper: #fbfbfc;
+  --muted: #a8a8b2;
+  --faint: #76767f;
+
+  --red: #e11d2e;
+  --red-hi: #ff3346;
+  --red-dim: #7d1220;
+
+  --line: rgba(255, 255, 255, 0.09);
+  --line-2: rgba(255, 255, 255, 0.16);
+
+  --amber: #d99a2b;
+  --green: #3fb27f;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 450;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--red);
+  color: #fff;
+}
+
+/* ---------------------------------------------------------- type */
+
+.display {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+}
+
+.display-md {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.12;
+}
+
+.mono {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-feature-settings: "liga" 0;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* ------------------------------------------------------ surfaces */
+
+.surface {
+  background: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.field {
+  background: var(--ink-2);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.field:focus-within {
+  border-color: var(--line-2);
+  background: var(--ink-3);
+}
+
+.rule {
+  height: 1px;
+  background: var(--line);
+  border: 0;
+  margin: 0;
+}
+
+/* ------------------------------------------------------ controls */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 3px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.btn-red {
+  width: 100%;
+  padding: 16px 20px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: var(--red);
+  color: #fff;
+}
+.btn-red:hover:not(:disabled) {
+  background: var(--red-hi);
+}
+.btn-red:disabled {
+  background: var(--ink-3);
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.btn-line {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  background: transparent;
+  color: var(--paper);
+  border: 1px solid var(--line-2);
+}
+.btn-line:hover:not(:disabled) {
+  border-color: var(--paper);
+}
+.btn-line:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-quiet {
+  padding: 0;
+  background: none;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.btn-quiet:hover {
+  color: var(--red-hi);
+}
+
+.tab {
+  flex: 1;
+  padding: 11px 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--faint);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.tab:hover {
+  color: var(--muted);
+}
+.tab[data-active="true"] {
+  color: var(--paper);
+  border-bottom-color: var(--red);
+}
+
+.amount {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--paper);
+  font-family: inherit;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+.amount::placeholder {
+  color: var(--faint);
+}
+
+.ticker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.tag-red {
+  border-color: rgba(225, 29, 46, 0.42);
+  color: var(--red);
+}
+
+/* -------------------------------------------------------- motion */
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--red);
+  animation: blink 2s ease-in-out infinite;
+}
+
+@keyframes sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
+}
+.scanning {
+  position: relative;
+  overflow: hidden;
+}
+.scanning::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 32%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(225, 29, 46, 0.16),
+    transparent
+  );
+  animation: sweep 1.15s linear infinite;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
+}
+.fade-up {
+  animation: fade-up 0.24s ease-out both;
+}
+
+/* Batch fill meter */
+.meter {
+  display: flex;
+  gap: 3px;
+}
+.meter span {
+  height: 3px;
+  flex: 1;
+  background: var(--ink-3);
+  transition: background 0.35s ease;
+}
+.meter span[data-on="true"] {
+  background: var(--red);
+}
+.meter span[data-required="true"] {
+  background: var(--red-dim);
+}
+
+/* Hairline grid backdrop for the hero */
+.grid-bg {
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 72px 72px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000, transparent 78%);
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000, transparent 78%);
+}

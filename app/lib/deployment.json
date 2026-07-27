@@ -1,0 +1,19 @@
+{
+  "chainId": 11155111,
+  "network": "sepolia",
+  "deployedAt": "2026-07-27T14:01:17.358Z",
+  "deployer": "0xcf03a13e54dba4c3e25394e909cb62fa0fd7fcaf",
+  "contracts": {
+    "base": "0x511f3d68d189f7e7704685dc94a511429ebb3455",
+    "quote": "0xf9a44d20901e270be2ee3f6c527ae0f9eb62bc53",
+    "router": "0xaa6ae9562580a7974a6105c2ad8134b6763608eb",
+    "hashswap": "0xa7254e5bea6f74582f967710e122d95c9fba4928"
+  },
+  "params": {
+    "refPrice": "2000000000000000000000",
+    "poolFee": 3000,
+    "baseReserve": "1000000000000000000000",
+    "quoteReserve": "2000000000000000000000000"
+  },
+  "note": "MockSwapRouter stands in for Uniswap; NoxCompute is the real singleton."
+}
