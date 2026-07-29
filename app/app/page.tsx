@@ -5,6 +5,7 @@ import { useSession } from "@/lib/useSession";
 import { Nav } from "@/components/Nav";
 import { Footer } from "@/components/Footer";
 import { NettingDiagram } from "@/components/NettingDiagram";
+import { SandwichCompare } from "@/components/SandwichCompare";
 
 const STEPS = [
   {
@@ -108,6 +109,8 @@ export default function Landing() {
           </div>
         </div>
       </section>
+
+      <SandwichCompare />
 
       {/* --------------------------------------------------------- privacy */}
       <section id="private" style={{ borderTop: "1px solid var(--line)" }}>

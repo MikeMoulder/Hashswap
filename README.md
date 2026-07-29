@@ -40,22 +40,30 @@ pool, so most volume never becomes public at all.
 
 | Contract | Address |
 |---|---|
-| **HashSwap** | [`0xa7254e5bea6f74582f967710e122d95c9fba4928`](https://sepolia.etherscan.io/address/0xa7254e5bea6f74582f967710e122d95c9fba4928) |
-| Base token | [`0x511f3d68d189f7e7704685dc94a511429ebb3455`](https://sepolia.etherscan.io/address/0x511f3d68d189f7e7704685dc94a511429ebb3455) |
-| Quote token | [`0xf9a44d20901e270be2ee3f6c527ae0f9eb62bc53`](https://sepolia.etherscan.io/address/0xf9a44d20901e270be2ee3f6c527ae0f9eb62bc53) |
-| Pool | [`0xaa6ae9562580a7974a6105c2ad8134b6763608eb`](https://sepolia.etherscan.io/address/0xaa6ae9562580a7974a6105c2ad8134b6763608eb) |
+| **HashSwap** | [`0xb27b0a0f47e5ca1f1daec32bcfbfc7310fa3d31f`](https://sepolia.etherscan.io/address/0xb27b0a0f47e5ca1f1daec32bcfbfc7310fa3d31f) |
+| **Uniswap v3 pool** | [`0xC645F52C30E0B1fbe81Cef0a6fA661B8AA95FEe0`](https://sepolia.etherscan.io/address/0xC645F52C30E0B1fbe81Cef0a6fA661B8AA95FEe0) |
+| Uniswap SwapRouter02 | [`0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E`](https://sepolia.etherscan.io/address/0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E) |
+| hBASE | [`0x22f6abe62bcd5f9c31dabba4b580d2eb6b07fcfe`](https://sepolia.etherscan.io/address/0x22f6abe62bcd5f9c31dabba4b580d2eb6b07fcfe) |
+| hQUOTE | [`0x64fbde826c6f086c4f52733e01251a37bf9bd021`](https://sepolia.etherscan.io/address/0x64fbde826c6f086c4f52733e01251a37bf9bd021) |
 
-Two batches have settled against the **real NoxCompute singleton and the real
-Handle Gateway** — the second one settled autonomously by the keeper daemon with
-no manual intervention:
+The pool is a **genuine Uniswap v3 deployment** — created through Uniswap's own
+factory, liquidity minted through their position manager, settlement routed
+through the canonical SwapRouter02. None of those contracts is forked, wrapped,
+or modified. Only the token pair is synthetic, because no Sepolia pair carries
+usable depth.
+
+A full batch has settled through it against the **real NoxCompute singleton and
+the real Handle Gateway**:
 
 ```
-batch 1: Settled  count=3  residual=2.0  clearing price 1990.03
-batch 2: Settled  count=3  residual=2.0  clearing price 1982.12   ← keeper
+3 encrypted intents   sell 6 + sell 4 + buy 8   = 18 gross volume
+residual to Uniswap   2 hBASE
+clearing price        1993.20
+pool tick             76012 -> 76004      (the residual actually traded)
 ```
 
-Each batch: three encrypted intents totalling 18 base of gross volume, of which
-**2 base reached the pool.**
+Sixteen of the eighteen never reached the market.
+
 
 ---
 
@@ -248,7 +256,9 @@ learns `R` in plaintext before submitting, so it could position its own
 transaction around the settlement swap. The `minOut` bound limits the damage;
 removing the trust entirely needs commit-reveal or a permissionless keeper set.
 The demo keeper currently passes an unbounded limit, which is safe against the
-mock pool and **would not be safe against a real one**.
+mock pool and **is not safe against the live one** — the keeper currently passes
+an unbounded limit, which must be replaced with a TWAP-derived bound before this
+handles real value.
 
 **Gas.** `submitIntent` costs ~760k gas — about 17 Nox ops at ~45k each, since
 every operation is an external call into the NoxCompute singleton. The
@@ -271,11 +281,15 @@ under-refunded instead.
 Gateway over an attested HTTPS channel; ECIES encryption happens inside the TEE.
 The guarantee rests on Intel TDX attestation, not on the client holding keys.
 
-**The pool in this deployment is a mock.** `MockSwapRouter` is a constant-product
-stand-in, deliberately kept in place so the Sepolia deployment isolates one
-variable — real Nox — rather than two. Real Uniswap v3 integration is covered by
-the local test suite and the adapter is written against the stock router
-interface.
+**The token pair is synthetic.** The Uniswap pool, factory, position manager and
+router are all the real Sepolia deployments, but hBASE/hQUOTE are our own ERC-20s
+— no testnet pair has enough liquidity to demonstrate netting against. The pool
+is seeded with 5,000 hBASE / 10,000,000 hQUOTE.
+
+**One market per deployment.** `baseToken`, `quoteToken` and `poolFee` are
+immutable constructor arguments, so an instance serves exactly one pair. Adding
+markets means deploying more instances behind a registry — straightforward, but
+not built.
 
 ---
 

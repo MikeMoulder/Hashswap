@@ -1,19 +1,26 @@
 {
   "chainId": 11155111,
   "network": "sepolia",
-  "deployedAt": "2026-07-27T14:01:17.358Z",
+  "deployedAt": "2026-07-27T16:49:42.030Z",
   "deployer": "0xcf03a13e54dba4c3e25394e909cb62fa0fd7fcaf",
   "contracts": {
-    "base": "0x511f3d68d189f7e7704685dc94a511429ebb3455",
-    "quote": "0xf9a44d20901e270be2ee3f6c527ae0f9eb62bc53",
-    "router": "0xaa6ae9562580a7974a6105c2ad8134b6763608eb",
-    "hashswap": "0xa7254e5bea6f74582f967710e122d95c9fba4928"
+    "base": "0x22f6abe62bcd5f9c31dabba4b580d2eb6b07fcfe",
+    "quote": "0x64fbde826c6f086c4f52733e01251a37bf9bd021",
+    "router": "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
+    "hashswap": "0xb27b0a0f47e5ca1f1daec32bcfbfc7310fa3d31f",
+    "pool": "0xC645F52C30E0B1fbe81Cef0a6fA661B8AA95FEe0"
+  },
+  "uniswap": {
+    "factory": "0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
+    "positionManager": "0x1238536071E1c677A632429e3655c799b22cDA52",
+    "swapRouter02": "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
+    "quoterV2": "0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3"
   },
   "params": {
     "refPrice": "2000000000000000000000",
     "poolFee": 3000,
-    "baseReserve": "1000000000000000000000",
-    "quoteReserve": "2000000000000000000000000"
+    "baseLiquidity": "5000000000000000000000",
+    "quoteLiquidity": "10000000000000000000000000"
   },
-  "note": "MockSwapRouter stands in for Uniswap; NoxCompute is the real singleton."
+  "note": "Real Uniswap v3 pool and SwapRouter02. Uniswap contracts are unmodified."
 }

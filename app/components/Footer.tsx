@@ -1,6 +1,7 @@
 "use client";
 
-import { CONTRACTS, short } from "@/lib/hashswap";
+import { short } from "@/lib/hashswap";
+import { MARKETS, UNISWAP } from "@/lib/markets";
 
 const EXPLORER = "https://sepolia.etherscan.io/address";
 
@@ -24,9 +25,12 @@ const COLUMNS: Array<{ head: string; items: Array<{ label: string; href?: string
   {
     head: "Contracts",
     items: [
-      { label: "HashSwap", href: `${EXPLORER}/${CONTRACTS.hashswap}`, value: short(CONTRACTS.hashswap, 6) },
-      { label: "hBASE", href: `${EXPLORER}/${CONTRACTS.base}`, value: short(CONTRACTS.base, 6) },
-      { label: "hQUOTE", href: `${EXPLORER}/${CONTRACTS.quote}`, value: short(CONTRACTS.quote, 6) },
+      ...MARKETS.map((m) => ({
+        label: `${m.base.symbol}/${m.quote.symbol}`,
+        href: `${EXPLORER}/${m.hashswap}`,
+        value: short(m.hashswap, 6),
+      })),
+      { label: "Uniswap router", href: `${EXPLORER}/${UNISWAP.swapRouter02}`, value: short(UNISWAP.swapRouter02, 6) },
     ],
   },
 ];

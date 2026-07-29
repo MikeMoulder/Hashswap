@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { CONTRACTS, fmt, short, tryDecrypt, type Session } from "@/lib/hashswap";
+import { fmt, short, tryDecrypt, type Session } from "@/lib/hashswap";
+import { formatUnits } from "@/lib/markets";
 
 type Row = { label: string; handle: string; value: bigint | null };
 
@@ -16,8 +17,8 @@ export function PrivacyProof({ session }: { session: Session | null }) {
   async function read(who: string): Promise<Row[]> {
     const out: Row[] = [];
     for (const [label, token] of [
-      ["hBASE", CONTRACTS.base],
-      ["hQUOTE", CONTRACTS.quote],
+      [session!.market.base.symbol, session!.market.base.address],
+      [session!.market.quote.symbol, session!.market.quote.address],
     ] as const) {
       const handle: string = await session!.hashswap.balanceHandleOf(token, who);
       const res = await tryDecrypt(session!.handleClient, handle);

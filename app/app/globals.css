@@ -174,25 +174,32 @@ body {
   color: var(--red-hi);
 }
 
-.tab {
-  flex: 1;
-  padding: 11px 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  background: transparent;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  color: var(--faint);
-  cursor: pointer;
-  transition: color 0.15s ease, border-color 0.15s ease;
-}
-.tab:hover {
+/* Direction toggle, notched between the two panels. Replaces buy/sell tabs:
+   in an AMM there is no book to buy or sell into — you hand over one asset and
+   receive another, and the flip is the only direction control needed. */
+.flip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 3px;
+  border: 3px solid var(--ink-1);
+  background: var(--ink-3);
   color: var(--muted);
+  cursor: pointer;
+  z-index: 2;
+  transition: color 0.15s ease, background 0.15s ease, transform 0.25s ease;
 }
-.tab[data-active="true"] {
+.flip:hover {
   color: var(--paper);
-  border-bottom-color: var(--red);
+  background: #26262d;
+}
+.flip:active {
+  transform: translate(-50%, -50%) rotate(180deg);
 }
 
 .amount {

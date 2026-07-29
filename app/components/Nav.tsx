@@ -14,7 +14,7 @@ export function Nav({
   connecting,
 }: {
   session: Session | null;
-  onConnect: () => void;
+  onConnect: (rdns?: string) => void;
   connecting?: boolean;
 }) {
   const path = usePathname();
@@ -51,7 +51,7 @@ export function Nav({
           session ? (
             <span className="tag mono">{short(session.address, 6)}</span>
           ) : (
-            <button className="btn btn-line" onClick={onConnect} disabled={connecting}>
+            <button className="btn btn-line" onClick={() => onConnect()} disabled={connecting}>
               {connecting ? "Connecting…" : "Connect wallet"}
             </button>
           )

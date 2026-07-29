@@ -1,13 +1,6 @@
 "use client";
 
-import { fmt } from "@/lib/hashswap";
-
-export type Token = { symbol: string; name: string };
-
-export const TOKENS: Record<"BASE" | "QUOTE", Token> = {
-  BASE: { symbol: "hBASE", name: "Base asset" },
-  QUOTE: { symbol: "hQUOTE", name: "Quote asset" },
-};
+import { formatUnits, type Token } from "@/lib/markets";
 
 /// One side of the trade. The `sealed` variant replaces the amount with a
 /// statement rather than a number, because with batch clearing the received
@@ -20,6 +13,7 @@ export function TokenPanel({
   onChange,
   balance,
   sealed,
+  estimate,
   busy,
 }: {
   label: string;
@@ -28,6 +22,7 @@ export function TokenPanel({
   onChange?: (v: string) => void;
   balance?: bigint | null;
   sealed?: boolean;
+  estimate?: bigint | null;
   busy?: boolean;
 }) {
   return (
@@ -40,11 +35,11 @@ export function TokenPanel({
               "—"
             ) : (
               <>
-                <span style={{ color: "var(--muted)" }}>{fmt(balance, 4)}</span>
+                <span style={{ color: "var(--muted)" }}>{formatUnits(balance, token.decimals, 4)}</span>
                 {onChange && balance > 0n && (
                   <button
                     className="btn btn-quiet ml-3"
-                    onClick={() => onChange(fmt(balance, 6).replace(/,/g, ""))}
+                    onClick={() => onChange(formatUnits(balance, token.decimals, 6).replace(/,/g, ""))}
                   >
                     MAX
                   </button>
@@ -57,14 +52,22 @@ export function TokenPanel({
 
       <div className="flex items-center gap-3">
         {sealed ? (
+          /* An estimate, clearly marked as one. Refusing to show any number at
+             all was over-cautious: the reference price is public and we can
+             price the trade as accurately as Uniswap does. What we genuinely
+             cannot know in advance is the batch clearing price, so the figure
+             is prefixed with ≈ and the details row says where the real one
+             comes from. */
           <div className="flex items-center gap-2.5" style={{ height: 40, flex: 1 }}>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={{ color: "var(--red)" }}>
-              <rect x="4.5" y="10.5" width="15" height="9" stroke="currentColor" strokeWidth="1.7" />
-              <path d="M8 10.5V7a4 4 0 018 0v3.5" stroke="currentColor" strokeWidth="1.7" />
-            </svg>
-            <span className="text-[17px]" style={{ color: "var(--muted)" }}>
-              Priced at settlement
-            </span>
+            {estimate != null && estimate > 0n ? (
+              <span className="amount" style={{ color: "var(--muted)" }}>
+                ≈ {formatUnits(estimate, token.decimals, 4)}
+              </span>
+            ) : (
+              <span className="text-[17px]" style={{ color: "var(--faint)" }}>
+                0.00
+              </span>
+            )}
           </div>
         ) : (
           <input
