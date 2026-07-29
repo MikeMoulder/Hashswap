@@ -3,86 +3,69 @@ import { network } from "hardhat";
 import { ethers } from "ethers";
 import { createEthersHandleClient, NotYetComputedHandleError } from "@iexec-nox/handle";
 
-/// The off-chain half of settlement.
+/// The off-chain half of settlement, across every market.
 ///
-/// Settlement is two transactions because Uniswap takes a plain `uint256` and
-/// the residual is encrypted (build.md §2.2). `closeBatch` publishes the residual
-/// handle; something off-chain must fetch the plaintext plus a gateway signature
-/// and hand both back to `settle`.
-///
-/// ## What the keeper is and is not trusted for
-///
-/// NOT trusted for the value: `settle` verifies the gateway's signature on-chain
-/// via `Nox.publicDecrypt`, so a forged residual reverts (invariant I7, proven on
-/// Sepolia). It IS trusted for liveness and ordering — it chooses *when* to
-/// submit, so it can position its own transaction around the settlement swap.
-/// The `minOut` bound is what limits that, and removing the ordering trust
-/// entirely needs commit-reveal or a permissionless keeper set (build.md F6).
-///
-/// ## Polling
-///
-/// Measured on Sepolia: a freshly-computed handle becomes decryptable after
-/// ~7 seconds, typically on the second attempt. The Runner computes off-chain
-/// after the transaction lands, so the first call reliably fails. That is
-/// expected, not an error — do not treat it as one.
-///
-/// Usage:
 ///   npx hardhat run scripts/keeper.ts --network sepolia
+///
+/// Settlement is two transactions because Uniswap takes a plain uint256 and the
+/// residual is encrypted. `closeBatch` publishes a handle; something off-chain
+/// must fetch the plaintext plus a gateway signature and hand both to `settle`.
+///
+/// ## Trust
+///
+/// NOT trusted for the value — `settle` verifies the gateway's signature
+/// on-chain via `Nox.publicDecrypt`, so a forged residual reverts. IS trusted
+/// for liveness and ordering: it chooses when to submit, so it could position
+/// its own transaction around the settlement swap. `minOut` bounds that, and
+/// removing the trust entirely needs commit-reveal or a permissionless keeper
+/// set.
+///
+/// ## Why it sweeps every market
+///
+/// Each market is a separate HashSwap deployment (base/quote/fee are immutable),
+/// so one keeper process watches several contracts rather than one.
 
-const POLL_INTERVAL_MS = Number(process.env.KEEPER_POLL_INTERVAL_MS ?? 2000);
+const POLL_MS = Number(process.env.KEEPER_POLL_INTERVAL_MS ?? 2500);
 const MAX_WAIT_MS = Number(process.env.KEEPER_MAX_WAIT_MS ?? 120_000);
-const TICK_MS = 5000;
+const TICK_MS = 8000;
+
+const HS_ABI = [
+  "function currentBatchId() view returns (uint256)",
+  "function getBatch(uint256) view returns (tuple(uint64 openedAt,uint64 closedAt,uint32 count,uint8 status,bytes32 totalBuy,bytes32 totalSell,bytes32 residualHandle,bytes32 sellSideHandle,uint256 refPrice,uint256 residual,uint256 clearingPrice,bool residualIsSell))",
+  "function settle(uint256,uint256,bytes,bool,bytes,uint256)",
+  "function closeBatch()",
+  "function MIN_BATCH_SIZE() view returns (uint32)",
+  "function BATCH_WINDOW() view returns (uint64)",
+];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const log = (m: string, d = "") =>
+  console.log(`${new Date().toISOString().slice(11, 19)}  ${m.padEnd(30)} ${d}`);
 
-function log(msg: string, detail = "") {
-  console.log(`${new Date().toISOString().slice(11, 19)}  ${msg.padEnd(26)} ${detail}`);
-}
-
-type Dep = { contracts: { hashswap: string } };
-
-/// Poll until the Runner has computed the handle, or give up.
-///
-/// Backs off geometrically. `NotYetComputedHandleError` is the expected early
-/// state; anything else is logged by class name so an unexpected failure is
-/// distinguishable from ordinary waiting.
-async function awaitHandle(
-  hc: any,
-  handle: `0x${string}`,
-  label: string,
-): Promise<{ value: bigint; decryptionProof: `0x${string}` }> {
+/// Poll until the Runner has computed the handle. A freshly written handle is
+/// never readable immediately — measured at ~7s on Sepolia — so the first
+/// attempt reliably fails and that is expected, not an error.
+async function resolve(hc: any, handle: string, label: string) {
   const started = Date.now();
-  let delay = POLL_INTERVAL_MS;
-
+  let delay = POLL_MS;
   while (Date.now() - started < MAX_WAIT_MS) {
     try {
-      const res = await hc.publicDecrypt(handle);
-      log(`${label} decrypted`, `${Date.now() - started}ms`);
-      return {
-        value: BigInt(res.value as any),
-        decryptionProof: res.decryptionProof as `0x${string}`,
-      };
+      const r = await hc.publicDecrypt(handle);
+      log(`${label} resolved`, `${Date.now() - started}ms`);
+      return { value: r.value, proof: r.decryptionProof as string };
     } catch (e: any) {
-      const kind =
-        e instanceof NotYetComputedHandleError
-          ? "not yet computed"
-          : (e?.constructor?.name ?? "error");
-      log(`${label} waiting`, `${kind} (${Date.now() - started}ms)`);
+      const why = e instanceof NotYetComputedHandleError ? "not yet computed" : (e?.message ?? "error");
+      log(`${label} waiting`, `${why.slice(0, 60)}`);
       await sleep(delay);
-      delay = Math.min(Math.floor(delay * 1.5), 15_000);
+      delay = Math.min(Math.floor(delay * 1.4), 12_000);
     }
   }
-  throw new Error(`${label}: handle never resolved within ${MAX_WAIT_MS}ms`);
+  throw new Error(`${label} never resolved within ${MAX_WAIT_MS}ms`);
 }
 
 async function main() {
-  const dep: Dep = JSON.parse(
-    readFileSync(`deployments/${process.env.HARDHAT_NETWORK ?? "sepolia"}.json`, "utf8"),
-  );
-
-  const { viem } = (await network.connect()) as any;
-  const publicClient = await viem.getPublicClient();
-  const hashswap = await viem.getContractAt("HashSwap", dep.contracts.hashswap);
+  const registry = JSON.parse(readFileSync("deployments/markets.json", "utf8"));
+  await network.connect();
 
   const provider = new ethers.JsonRpcProvider((process.env.SEPOLIA_RPC_URL ?? "").trim());
   const signer = new ethers.Wallet(
@@ -91,74 +74,94 @@ async function main() {
   );
   const hc = await createEthersHandleClient(signer as any);
 
-  log("keeper online", hashswap.address);
+  const markets = registry.markets.map((m: any) => ({
+    ...m,
+    contract: new ethers.Contract(m.hashswap, HS_ABI, signer),
+  }));
 
-  const settled = new Set<string>();
+  log("keeper online", `${markets.length} markets, ${signer.address.slice(0, 10)}…`);
+  for (const m of markets) log(`  watching ${m.id}`, m.hashswap);
+
+  const done = new Set<string>();
 
   for (;;) {
-    try {
-      const batchId: bigint = await hashswap.read.currentBatchId();
+    for (const m of markets) {
+      const key = (id: bigint) => `${m.id}#${id}`;
+      try {
+        const current: bigint = await m.contract.currentBatchId();
 
-      // Sweep the current batch and a few behind it: closing opens a new batch,
-      // so the one needing settlement is usually already historical.
-      for (let id = batchId; id > 0n && id > batchId - 5n; id--) {
-        if (settled.has(id.toString())) continue;
+        // Closing opens a new batch, so the one needing settlement is usually
+        // already historical — sweep a few back.
+        for (let id = current; id > 0n && id > current - 4n; id--) {
+          if (done.has(key(id))) continue;
 
-        const batch = await hashswap.read.getBatch([id]);
-        const status = Number(batch.status);
+          const b = await m.contract.getBatch(id);
+          const status = Number(b.status);
 
-        // 0 Open · 1 Closed · 2 Settled · 3 Cancelled
-        if (status === 2 || status === 3) {
-          settled.add(id.toString());
-          continue;
+          if (status === 2 || status === 3) {
+            done.add(key(id));
+            continue;
+          }
+
+          // Close a batch whose window has elapsed and which has enough
+          // participants to hide them. Below MIN_BATCH_SIZE the contract rolls
+          // over instead, so calling close is harmless but pointless.
+          if (status === 0) {
+            const [minSize, windowSec] = await Promise.all([
+              m.contract.MIN_BATCH_SIZE(),
+              m.contract.BATCH_WINDOW(),
+            ]);
+            const elapsed = Math.floor(Date.now() / 1000) - Number(b.openedAt);
+            if (Number(b.count) >= Number(minSize) && elapsed >= Number(windowSec)) {
+              log(`${m.id} closing batch ${id}`, `${b.count} orders`);
+              await (await m.contract.closeBatch()).wait();
+            }
+            continue;
+          }
+
+          // status === 1, Closed and awaiting settlement.
+          log(`${m.id} batch ${id} closed`, "resolving residual");
+
+          let residual, side;
+          try {
+            residual = await resolve(hc, b.residualHandle, "residual");
+            side = await resolve(hc, b.sellSideHandle, "direction");
+          } catch (e: any) {
+            // Do not spin. `cancelBatch` exists precisely so a stuck batch
+            // refunds rather than locking funds.
+            log(`${m.id} batch ${id} STUCK`, e.message);
+            continue;
+          }
+
+          const amount = BigInt(residual.value as any);
+          const isSell = Boolean(side.value);
+
+          // TODO: derive from the pool's observe() TWAP. Unbounded means the
+          // keeper's own ordering is unconstrained — acceptable on a testnet,
+          // not acceptable against real value.
+          const limit = isSell ? 0n : ethers.MaxUint256;
+
+          log(
+            `${m.id} settling ${id}`,
+            `${ethers.formatUnits(amount, m.base.decimals)} ${m.base.symbol} ${isSell ? "sell" : "buy"}`,
+          );
+
+          const receipt = await (
+            await m.contract.settle(id, amount, residual.proof, isSell, side.proof, limit)
+          ).wait();
+
+          const after = await m.contract.getBatch(id);
+          const price = ethers.formatUnits(
+            after.clearingPrice,
+            18 + m.base.decimals - m.quote.decimals,
+          );
+          log(`${m.id} batch ${id} settled`, `gas ${receipt.gasUsed}, price ${price} ${m.quote.symbol}`);
+          done.add(key(id));
         }
-        if (status !== 1) continue;
-
-        log(`batch ${id} closed`, "resolving residual");
-
-        let residual: { value: bigint; decryptionProof: `0x${string}` };
-        let side: { value: bigint; decryptionProof: `0x${string}` };
-        try {
-          residual = await awaitHandle(hc, batch.residualHandle, "residual");
-          side = await awaitHandle(hc, batch.sellSideHandle, "direction");
-        } catch (e: any) {
-          // Unresolvable handle. Do not spin: the on-chain cancel path exists
-          // precisely so a stuck batch refunds instead of locking funds
-          // (build.md F4). Leave it for `cancelBatch` once the timeout elapses.
-          log(`batch ${id} STUCK`, e.message);
-          continue;
-        }
-
-        const isSell = side.value !== 0n;
-
-        // TODO(build.md F6): derive this from the pool's `observe` TWAP. A zero
-        // bound means the keeper's own ordering is unconstrained, which is
-        // acceptable against a mock pool and NOT acceptable against a real one.
-        const limitAmount = isSell ? 0n : ethers.MaxUint256;
-
-        log(
-          `settling ${id}`,
-          `${ethers.formatEther(residual.value)} base, ${isSell ? "sell" : "buy"}`,
-        );
-
-        const hash = await hashswap.write.settle([
-          id,
-          residual.value,
-          residual.decryptionProof,
-          isSell,
-          side.decryptionProof,
-          limitAmount,
-        ]);
-        const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-        const after = await hashswap.read.getBatch([id]);
-        log(`batch ${id} settled`, `gas ${receipt.gasUsed}, price ${after.clearingPrice}`);
-        settled.add(id.toString());
+      } catch (e: any) {
+        log(`${m.id} tick error`, (e?.shortMessage ?? e?.message ?? String(e)).slice(0, 80));
       }
-    } catch (e: any) {
-      log("tick error", e?.shortMessage ?? e?.message ?? String(e));
     }
-
     await sleep(TICK_MS);
   }
 }
