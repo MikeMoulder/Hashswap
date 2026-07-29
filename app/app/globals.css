@@ -4,30 +4,32 @@
 
 /* ================================================================
    HashSwap — red / black / white
-   Red is the scarcest element on the page. It marks one action and
-   one idea at a time; everywhere else the page is monochrome. That
-   restraint is what makes it read as an instrument rather than an app.
+   Red marks one action and one idea at a time. Everything else is
+   monochrome, so the page reads as an instrument, not an advert.
    ================================================================ */
 
 :root {
   --ink: #08080a;
-  --ink-1: #0e0e11;
-  --ink-2: #141418;
-  --ink-3: #1c1c21;
+  --ink-1: #0d0d10;
+  --ink-2: #121216;
+  --ink-3: #191920;
 
-  --paper: #fbfbfc;
-  --muted: #a8a8b2;
-  --faint: #76767f;
+  --paper: #f4f4f6;
+  --muted: #a2a2ad;
+  --faint: #6e6e7a;
 
   --red: #e11d2e;
-  --red-hi: #ff3346;
-  --red-dim: #7d1220;
+  --red-hi: #ff3446;
+  --red-dim: rgba(225, 29, 46, 0.28);
 
-  --line: rgba(255, 255, 255, 0.09);
-  --line-2: rgba(255, 255, 255, 0.16);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.15);
 
   --amber: #d99a2b;
   --green: #3fb27f;
+
+  --glass: rgba(18, 18, 22, 0.55);
+  --glass-line: rgba(255, 255, 255, 0.1);
 }
 
 * {
@@ -43,7 +45,8 @@ body {
   background: var(--ink);
   color: var(--paper);
   font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
-  font-weight: 450;
+  font-weight: 400;
+  letter-spacing: -0.006em;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -53,20 +56,18 @@ body {
   color: #fff;
 }
 
-/* ---------------------------------------------------------- type */
+/* ------------------------------------------------------------ type */
 
 .display {
-  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
-  font-weight: 800;
-  letter-spacing: -0.035em;
-  line-height: 1.02;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.06;
 }
 
 .display-md {
-  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
-  font-weight: 700;
-  letter-spacing: -0.025em;
-  line-height: 1.12;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  line-height: 1.15;
 }
 
 .mono {
@@ -80,29 +81,48 @@ body {
 
 .eyebrow {
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.13em;
+  font-weight: 600;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--faint);
 }
 
-/* ------------------------------------------------------ surfaces */
+/* -------------------------------------------------------- surfaces */
+
+/* Glass: translucent panel over the animated grid, so the motion shows
+   through faintly rather than being covered up. */
+.glass {
+  background: var(--glass);
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  border: 1px solid var(--glass-line);
+  border-radius: 14px;
+}
+
+.glass-strong {
+  background: rgba(13, 13, 16, 0.78);
+  backdrop-filter: blur(26px) saturate(1.3);
+  -webkit-backdrop-filter: blur(26px) saturate(1.3);
+  border: 1px solid var(--glass-line);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.9);
+}
 
 .surface {
   background: var(--ink-1);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 12px;
 }
 
 .field {
-  background: var(--ink-2);
+  background: rgba(8, 8, 10, 0.5);
   border: 1px solid transparent;
-  border-radius: 3px;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  border-radius: 10px;
+  transition: border-color 0.16s ease, background 0.16s ease;
 }
 .field:focus-within {
   border-color: var(--line-2);
-  background: var(--ink-3);
+  background: rgba(8, 8, 10, 0.75);
 }
 
 .rule {
@@ -112,7 +132,7 @@ body {
   margin: 0;
 }
 
-/* ------------------------------------------------------ controls */
+/* -------------------------------------------------------- controls */
 
 .btn {
   display: inline-flex;
@@ -120,20 +140,22 @@ body {
   justify-content: center;
   gap: 8px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 10px;
   font-family: inherit;
-  font-weight: 600;
+  font-weight: 550;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease,
-    opacity 0.15s ease;
+    opacity 0.15s ease, transform 0.1s ease;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .btn-red {
   width: 100%;
-  padding: 16px 20px;
+  padding: 15px 20px;
   font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  font-weight: 600;
   background: var(--red);
   color: #fff;
 }
@@ -141,7 +163,7 @@ body {
   background: var(--red-hi);
 }
 .btn-red:disabled {
-  background: var(--ink-3);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--faint);
   cursor: not-allowed;
 }
@@ -149,13 +171,15 @@ body {
 .btn-line {
   padding: 10px 16px;
   font-size: 13px;
-  font-weight: 600;
-  background: transparent;
+  font-weight: 550;
+  background: rgba(255, 255, 255, 0.03);
   color: var(--paper);
   border: 1px solid var(--line-2);
+  backdrop-filter: blur(8px);
 }
 .btn-line:hover:not(:disabled) {
-  border-color: var(--paper);
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.06);
 }
 .btn-line:disabled {
   opacity: 0.35;
@@ -168,38 +192,10 @@ body {
   color: var(--red);
   font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
 }
 .btn-quiet:hover {
   color: var(--red-hi);
-}
-
-/* Direction toggle, notched between the two panels. Replaces buy/sell tabs:
-   in an AMM there is no book to buy or sell into — you hand over one asset and
-   receive another, and the flip is the only direction control needed. */
-.flip {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 3px;
-  border: 3px solid var(--ink-1);
-  background: var(--ink-3);
-  color: var(--muted);
-  cursor: pointer;
-  z-index: 2;
-  transition: color 0.15s ease, background 0.15s ease, transform 0.25s ease;
-}
-.flip:hover {
-  color: var(--paper);
-  background: #26262d;
-}
-.flip:active {
-  transform: translate(-50%, -50%) rotate(180deg);
 }
 
 .amount {
@@ -209,9 +205,9 @@ body {
   background: transparent;
   color: var(--paper);
   font-family: inherit;
-  font-size: 30px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-size: 29px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
   font-variant-numeric: tabular-nums;
   min-width: 0;
 }
@@ -223,12 +219,12 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 7px 12px;
   border: 1px solid var(--line-2);
-  border-radius: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
   font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
+  font-weight: 550;
   white-space: nowrap;
 }
 
@@ -238,19 +234,62 @@ body {
   gap: 6px;
   padding: 4px 9px;
   border: 1px solid var(--line);
-  border-radius: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.11em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
 }
 .tag-red {
-  border-color: rgba(225, 29, 46, 0.42);
+  border-color: var(--red-dim);
   color: var(--red);
 }
 
-/* -------------------------------------------------------- motion */
+/* Direction toggle notched between the two panels */
+.flip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  border: 4px solid var(--ink-1);
+  background: var(--ink-3);
+  color: var(--paper);
+  cursor: pointer;
+  z-index: 2;
+  transition: background 0.16s ease, transform 0.25s ease;
+}
+.flip:hover {
+  background: #23232c;
+}
+.flip:active {
+  transform: translate(-50%, -50%) rotate(180deg);
+}
+
+/* --------------------------------------------------- encrypted mark
+
+   Borrowed idiom: an encrypted value is drawn as solid blocks rather
+   than a dash or a zero. It says "there is a number here and you may
+   not have it", which is exactly the product. */
+.redacted {
+  display: inline-block;
+  color: transparent;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--ink-3) 0 10px,
+    transparent 10px 13px
+  );
+  border-radius: 2px;
+  user-select: none;
+}
+
+/* ---------------------------------------------------------- motion */
 
 @keyframes blink {
   0%, 100% { opacity: 1; }
@@ -277,12 +316,7 @@ body {
   position: absolute;
   inset: 0;
   width: 32%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(225, 29, 46, 0.16),
-    transparent
-  );
+  background: linear-gradient(90deg, transparent, rgba(225, 29, 46, 0.16), transparent);
   animation: sweep 1.15s linear infinite;
 }
 
@@ -294,6 +328,426 @@ body {
   animation: fade-up 0.24s ease-out both;
 }
 
+/* ------------------------------------------------------- order flow
+
+   A vertical stepper. Three things carry the state: the node (hollow /
+   spinning / filled), the rail below it (grey until the step above is
+   done, then it fills downward), and the opacity of the row itself.
+   Steps not yet reached are dimmed rather than hidden, so the path is
+   legible before anything happens. */
+
+/* An inset panel, so the timeline reads as its own module rather than as more
+   rows of the trade summary above it. A rule alone was not enough separation
+   once both sections were dense text at similar sizes. */
+.flow {
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.022);
+  border: 1px solid var(--line);
+}
+:root[data-theme="light"] .flow {
+  background: rgba(0, 0, 0, 0.022);
+}
+
+/* The timeline is a window, not the whole scroll. Eight steps at full height
+   pushed the batch strip below the fold, so the list scrolls inside a fixed
+   frame and the active step is kept in view. */
+.flow-frame {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3px 1fr;
+  gap: 12px;
+}
+
+/* A full-length read-out of where you are, so the scrolled window stays
+   locatable. It is the only part of the timeline that is always visible. */
+.flow-progress {
+  position: relative;
+  border-radius: 999px;
+  background: var(--ink-3);
+  overflow: hidden;
+}
+.flow-progress::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--p, 0%);
+  background: linear-gradient(180deg, var(--red), var(--red-hi));
+  border-radius: 999px;
+  transition: height 0.5s ease;
+}
+
+.flow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 2px 0 0;
+  max-height: 226px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+
+/* Fade only the edge that is actually cutting something off.
+   A permanent top fade meant step one was drawn half-transparent while sitting
+   at the top of an unscrolled list, which read as a clipping bug rather than as
+   an affordance. */
+.flow-list[data-fade-top="true"] {
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 18px);
+  mask-image: linear-gradient(180deg, transparent 0, #000 18px);
+}
+.flow-list[data-fade-bottom="true"] {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+}
+.flow-list[data-fade-top="true"][data-fade-bottom="true"] {
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 18px, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 18px, #000 calc(100% - 22px), transparent 100%);
+}
+
+.flow-list::-webkit-scrollbar {
+  width: 4px;
+}
+.flow-list::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 999px;
+}
+.flow-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.flow-step {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 12px;
+  /* The stagger is on a delay, not a duration: every row animates at the
+     same speed, they simply start one after another. */
+  animation: fade-up 0.3s ease-out both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+.flow-gutter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.flow-node {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1.5px solid var(--line-2);
+  background: var(--ink-1);
+  color: #fff;
+  transition: background 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
+}
+
+/* The rail is drawn full height and scaled from the top, so "filling" is a
+   transform rather than a height animation — no layout work per frame. */
+.flow-rail {
+  position: relative;
+  flex: 1;
+  width: 2px;
+  min-height: 14px;
+  margin: 3px 0;
+  background: var(--ink-3);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.flow-rail::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--red);
+  transform: scaleY(0);
+  transform-origin: top;
+  transition: transform 0.45s ease;
+}
+
+.flow-body {
+  padding-bottom: 14px;
+  min-width: 0;
+}
+
+.flow-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.flow-note {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.flow-chain {
+  margin: 3px 0 0;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+
+/* Public / private marker. Red is reserved for the two moments something
+   genuinely becomes visible, which is the point being made. */
+.flow-vis {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 1.5px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--faint);
+}
+.flow-vis[data-vis="public"] {
+  border-color: var(--red-dim);
+  color: var(--red);
+}
+
+/* ---- states */
+
+.flow-step[data-state="todo"] {
+  opacity: 0.42;
+}
+
+.flow-step[data-state="skipped"] {
+  opacity: 0.42;
+}
+.flow-step[data-state="skipped"] .flow-node::after {
+  content: "";
+  width: 6px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: var(--faint);
+}
+.flow-step[data-state="skipped"] .flow-rail::after,
+.flow-step[data-state="done"] .flow-rail::after {
+  transform: scaleY(1);
+}
+
+.flow-step[data-state="done"] .flow-node {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.flow-step[data-state="active"] .flow-node {
+  border-color: var(--red);
+  transform: scale(1.12);
+}
+/* A halo that expands and fades, so the current step reads as working rather
+   than merely selected. */
+.flow-step[data-state="active"] .flow-node::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 999px;
+  border: 1.5px solid var(--red);
+  animation: flow-halo 1.6s ease-out infinite;
+}
+@keyframes flow-halo {
+  0% { transform: scale(0.7); opacity: 0.85; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+/* A single rotating arc rather than a full ring: an open gap is what makes
+   the rotation visible at 16px. */
+.flow-spin {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--red);
+  border-right-color: var(--red);
+  animation: flow-spin 0.75s linear infinite;
+}
+@keyframes flow-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* The rail below the active step creeps rather than fills, since we do not
+   know how long the step will take — it signals movement, not progress. */
+.flow-step[data-state="active"] .flow-rail::after {
+  transform: scaleY(1);
+  animation: flow-creep 1.8s ease-in-out infinite;
+}
+@keyframes flow-creep {
+  0%, 100% { transform: scaleY(0.12); opacity: 0.55; }
+  50% { transform: scaleY(0.6); opacity: 1; }
+}
+
+.flow-step[data-state="active"] .flow-title,
+.flow-step[data-state="done"] .flow-title {
+  color: var(--paper);
+}
+.flow-step[data-state="active"] .flow-note {
+  color: var(--paper);
+}
+
+.flow-step[data-state="failed"] .flow-node {
+  background: var(--red);
+  border-color: var(--red);
+}
+.flow-step[data-state="failed"] .flow-title {
+  color: var(--red);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-step,
+  .flow-spin,
+  .flow-step[data-state="active"] .flow-node::before,
+  .flow-step[data-state="active"] .flow-rail::after {
+    animation: none;
+  }
+  .flow-step[data-state="active"] .flow-rail::after {
+    transform: scaleY(0.3);
+  }
+}
+
+/* --------------------------------------------------- horizontal cycle
+
+   The withdrawal's three beats, drawn across rather than down. Three steps
+   do not need a scrolling column, and the shape itself carries the point
+   that the middle one is off-chain: two transactions with a wait wedged
+   between them. */
+.cycle {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cycle-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  min-width: 0;
+}
+
+/* The rail is drawn as two half-segments either side of each node, so a
+   segment can be filled independently of its neighbours. */
+.cycle-track {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 18px;
+}
+.cycle-track::before,
+.cycle-track::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  height: 2px;
+  background: var(--ink-3);
+  transform: translateY(-50%);
+  transition: background 0.4s ease;
+}
+.cycle-track::before {
+  left: 0;
+  right: 50%;
+}
+.cycle-track::after {
+  left: 50%;
+  right: 0;
+}
+.cycle-step:first-child .cycle-track::before,
+.cycle-step:last-child .cycle-track::after {
+  display: none;
+}
+
+.cycle-node {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1.5px solid var(--line-2);
+  background: var(--ink-1);
+  color: #fff;
+  transition: background 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
+}
+
+.cycle-label {
+  margin-top: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.cycle-note {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--faint);
+  padding: 0 4px;
+}
+
+/* A dashed segment for the leg that is not a transaction. It is the one
+   part of the sequence nobody signs, and it is where the wait lives. */
+.cycle-step[data-offchain="true"] .cycle-track::before,
+.cycle-step[data-offchain="true"] .cycle-track::after {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--ink-3) 0 4px,
+    transparent 4px 7px
+  );
+}
+
+.cycle-step[data-state="todo"] {
+  opacity: 0.45;
+}
+
+.cycle-step[data-state="done"] .cycle-node {
+  background: var(--red);
+  border-color: var(--red);
+}
+.cycle-step[data-state="done"] .cycle-track::before,
+.cycle-step[data-state="done"] .cycle-track::after,
+.cycle-step[data-state="active"] .cycle-track::before {
+  background: var(--red);
+}
+
+.cycle-step[data-state="active"] .cycle-node {
+  border-color: var(--red);
+  transform: scale(1.12);
+}
+.cycle-step[data-state="active"] .cycle-node::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 999px;
+  border: 1.5px solid var(--red);
+  animation: flow-halo 1.6s ease-out infinite;
+}
+
+.cycle-step[data-state="failed"] .cycle-node {
+  background: var(--red);
+  border-color: var(--red);
+}
+.cycle-step[data-state="failed"] .cycle-label {
+  color: var(--red);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cycle-step[data-state="active"] .cycle-node::before {
+    animation: none;
+  }
+}
+
 /* Batch fill meter */
 .meter {
   display: flex;
@@ -303,6 +757,7 @@ body {
   height: 3px;
   flex: 1;
   background: var(--ink-3);
+  border-radius: 999px;
   transition: background 0.35s ease;
 }
 .meter span[data-on="true"] {
@@ -312,12 +767,323 @@ body {
   background: var(--red-dim);
 }
 
-/* Hairline grid backdrop for the hero */
+/* ------------------------------------------------ animated backdrop
+
+   A grid that drifts diagonally, masked to fade out below the fold so
+   it frames the top of the page instead of tiling the whole thing. */
+@keyframes grid-drift {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 64px 64px, 64px 64px; }
+}
+
 .grid-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
   background-image:
     linear-gradient(var(--line) 1px, transparent 1px),
     linear-gradient(90deg, var(--line) 1px, transparent 1px);
-  background-size: 72px 72px;
-  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000, transparent 78%);
-  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000, transparent 78%);
+  background-size: 64px 64px, 64px 64px;
+  animation: grid-drift 9s linear infinite;
+  -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 10%, transparent 75%);
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 10%, transparent 75%);
+}
+
+/* A slow red bloom behind the grid so the top of the page has depth. */
+.bloom {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(560px 320px at 50% -6%, rgba(225, 29, 46, 0.16), transparent 70%),
+    radial-gradient(420px 260px at 82% 4%, rgba(225, 29, 46, 0.07), transparent 70%);
+}
+
+@keyframes float-y {
+  0%, 100% { transform: translateY(0) rotate(var(--r, 0deg)); }
+  50% { transform: translateY(-9px) rotate(var(--r, 0deg)); }
+}
+.doodle {
+  position: absolute;
+  pointer-events: none;
+  color: var(--line-2);
+  animation: float-y var(--dur, 7s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheen,
+  .grid-bg,
+  .doodle,
+  .dot,
+  .scanning::after {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------- light
+
+   Same brand, inverted ground. Red is unchanged — it is the one constant
+   across both themes, which is what keeps the identity intact when the
+   background flips. Glass gets *lighter* and less saturated here: a dark
+   blur over white reads as dirt. */
+:root[data-theme="light"] {
+  --ink: #fbfbfc;
+  --ink-1: #ffffff;
+  --ink-2: #f4f4f6;
+  --ink-3: #e8e8ec;
+
+  --paper: #0b0b0f;
+  --muted: #5f5f6b;
+  --faint: #8a8a96;
+
+  --line: rgba(0, 0, 0, 0.09);
+  --line-2: rgba(0, 0, 0, 0.16);
+
+  --glass: rgba(255, 255, 255, 0.62);
+  --glass-line: rgba(0, 0, 0, 0.09);
+}
+
+:root[data-theme="light"] .glass-strong {
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 22px 50px -26px rgba(0, 0, 0, 0.25);
+}
+
+:root[data-theme="light"] .field {
+  background: rgba(0, 0, 0, 0.035);
+}
+:root[data-theme="light"] .field:focus-within {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"] .btn-line {
+  background: rgba(0, 0, 0, 0.02);
+}
+:root[data-theme="light"] .btn-line:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.3);
+}
+
+:root[data-theme="light"] .tag,
+:root[data-theme="light"] .ticker {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+:root[data-theme="light"] .flip {
+  border-color: var(--ink-1);
+  background: var(--ink-3);
+}
+:root[data-theme="light"] .flip:hover {
+  background: #dcdce2;
+}
+
+:root[data-theme="light"] .bloom {
+  background:
+    radial-gradient(560px 320px at 50% -6%, rgba(225, 29, 46, 0.09), transparent 70%),
+    radial-gradient(420px 260px at 82% 4%, rgba(225, 29, 46, 0.05), transparent 70%);
+}
+
+:root[data-theme="light"] .redacted {
+  background: repeating-linear-gradient(90deg, var(--ink-3) 0 10px, transparent 10px 13px);
+}
+
+/* ---------------------------------------------------------- nav pill
+
+   A floating bar rather than a full-width band: it detaches from the page,
+   so the animated grid runs behind and past it instead of being cut off by
+   an opaque strip across the top. */
+.nav-pill {
+  position: relative;
+  /* NOT `overflow: hidden` — the account dropdown hangs below the pill and got
+     sliced off. The sheen is what needed clipping, so it clips itself now
+     (`.sheen-clip`) instead of the whole bar doing it for it. */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  max-width: 940px;
+  padding: 0 8px 0 20px;
+  /* Rests 4px taller than the scrolled state, not 8 — the full-size version read
+     as the bar jumping rather than settling. */
+  height: 60px;
+  border-radius: 16px;
+  transition: height 0.3s ease, background 0.3s ease;
+
+  /* suitz's recipe. Three things I had wrong:
+     the inner highlight (an edge for light to catch), a real drop shadow
+     (it has to sit ABOVE the page, not in it), and saturate() — without
+     boosting saturation the blurred backdrop goes grey and dead. */
+  background: rgba(10, 10, 10, 0.42);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 16px 48px -18px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.nav-pill[data-scrolled="true"] {
+  height: 56px;
+  background: rgba(10, 10, 10, 0.62);
+}
+
+/* A slow highlight sweeping across the glass. Cheap, and it is what stops a
+   blurred panel reading as a flat rectangle when nothing is moving behind it. */
+@keyframes sheen {
+  0% { transform: translateX(-140%) skewX(-18deg); }
+  /* 22% of 17.5s is the same ~3.9s sweep as before — the cycle got longer, not
+     the motion slower, so it stays a glint instead of becoming a crawl. */
+  22%, 100% { transform: translateX(520%) skewX(-18deg); }
+}
+/* Keeps the sweep inside the rounded corners now that the pill no longer clips. */
+.sheen-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.sheen {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 22%;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.16),
+    transparent
+  );
+  filter: blur(2px);
+  animation: sheen 17.5s ease-in-out infinite;
+}
+
+/* Links get an underline that grows from nothing, rather than a filled pill. */
+.nav-link {
+  position: relative;
+  padding: 8px 12px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--muted);
+  transition: color 0.18s ease;
+  white-space: nowrap;
+}
+.nav-link::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 4px;
+  height: 1.5px;
+  background: var(--red);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.22s ease;
+}
+.nav-link:hover {
+  color: var(--paper);
+}
+.nav-link:hover::after,
+.nav-link[data-active="true"]::after {
+  transform: scaleX(1);
+}
+.nav-link[data-active="true"] {
+  color: var(--paper);
+}
+
+.nav-link {
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  transition: color 0.15s ease, background 0.15s ease;
+  white-space: nowrap;
+}
+.nav-link:hover {
+  color: var(--paper);
+}
+.nav-link[data-active="true"] {
+  color: var(--paper);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.icon-btn:hover {
+  color: var(--paper);
+  background: rgba(255, 255, 255, 0.07);
+}
+:root[data-theme="light"] .icon-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* Light mode needs the glass tuned, not just recoloured.
+   A 62%-white panel over a near-white page has almost no luminance
+   difference to blur, so it reads as a flat grey rectangle. Dropping the
+   alpha lets the grid and bloom through, and a bright inner highlight plus
+   a real shadow give it an edge to catch — which is what actually sells
+   glass, rather than the blur radius. */
+:root[data-theme="light"] .nav-pill {
+  background: rgba(255, 255, 255, 0.55);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow:
+    0 16px 48px -18px rgba(10, 10, 10, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+:root[data-theme="light"] .nav-pill[data-scrolled="true"] {
+  background: rgba(255, 255, 255, 0.72);
+}
+:root[data-theme="light"] .sheen {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.85), transparent);
+}
+
+:root[data-theme="light"] .glass {
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(20px) saturate(1.6);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  border-color: rgba(255, 255, 255, 0.8);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+:root[data-theme="light"] .glass-strong {
+  background: rgba(255, 255, 255, 0.58);
+  backdrop-filter: blur(28px) saturate(1.7);
+  -webkit-backdrop-filter: blur(28px) saturate(1.7);
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 22px 50px -26px rgba(0, 0, 0, 0.28);
+}
+
+/* Give the blur something to work with: a stronger grid and a warmer bloom. */
+:root[data-theme="light"] .grid-bg {
+  background-image:
+    linear-gradient(rgba(0, 0, 0, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.055) 1px, transparent 1px);
+}
+
+:root[data-theme="light"] .bloom {
+  background:
+    radial-gradient(560px 320px at 50% -6%, rgba(225, 29, 46, 0.13), transparent 70%),
+    radial-gradient(420px 260px at 82% 4%, rgba(225, 29, 46, 0.08), transparent 70%);
+}
+
+:root[data-theme="light"] .doodle {
+  color: rgba(0, 0, 0, 0.14);
 }

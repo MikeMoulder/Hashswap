@@ -2,36 +2,13 @@
 
 import { useState } from "react";
 import { MARKETS, humanPrice, priceIsRealistic, type Market } from "@/lib/markets";
+import { TokenPair } from "./TokenIcon";
 
 /// Market selector.
 ///
 /// Each market is a separate HashSwap deployment against a pre-existing Sepolia
 /// Uniswap pool, so switching markets means switching contracts — not just a
 /// display filter. Changing it drops the session and reconnects.
-
-function Coin({ symbol }: { symbol: string }) {
-  const tint: Record<string, string> = {
-    WETH: "#8b8bd4",
-    LINK: "#3b6ce8",
-    DAI: "#e5a83b",
-    USDC: "#3b8fe8",
-  };
-  return (
-    <span
-      className="grid place-items-center rounded-full shrink-0"
-      style={{
-        width: 22,
-        height: 22,
-        background: tint[symbol] ?? "var(--red)",
-        color: "#08080a",
-        fontSize: 9,
-        fontWeight: 800,
-      }}
-    >
-      {symbol.slice(0, 2)}
-    </span>
-  );
-}
 
 export function MarketPicker({
   market,
@@ -58,10 +35,7 @@ export function MarketPicker({
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="flex items-center" style={{ marginRight: -8 }}>
-          <Coin symbol={market.base.symbol} />
-        </span>
-        <Coin symbol={market.quote.symbol} />
+        <TokenPair base={market.base.symbol} quote={market.quote.symbol} size={22} />
         <span className="text-[14px] font-bold tracking-tight">
           {market.base.symbol} / {market.quote.symbol}
         </span>
@@ -95,10 +69,7 @@ export function MarketPicker({
                     if (m.id !== market.id) onSelect(m.id);
                   }}
                 >
-                  <span className="flex items-center" style={{ marginRight: -8 }}>
-                    <Coin symbol={m.base.symbol} />
-                  </span>
-                  <Coin symbol={m.quote.symbol} />
+                  <TokenPair base={m.base.symbol} quote={m.quote.symbol} size={22} />
                   <div className="min-w-0">
                     <p className="text-[13px] font-bold">
                       {m.base.symbol} / {m.quote.symbol}

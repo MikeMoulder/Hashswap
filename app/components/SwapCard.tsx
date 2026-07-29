@@ -1,13 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ethers } from "ethers";
-import { tryDecrypt, type Session } from "@/lib/hashswap";
-import { formatUnits, parseUnits, humanPrice, getMarket, type Market } from "@/lib/markets";
-import { TokenPanel } from "./TokenPanel";
+import { useCallback, useEffect, useState } from "react";
+import {
+  BUFFER_BPS_FALLBACK,
+  cryptoUnavailable,
+  explain,
+  readHandle,
+  type Session,
+} from "@/lib/hashswap";
+import { formatUnits, parseUnits, type Market } from "@/lib/markets";
+import type { BatchLimits, BatchView } from "@/lib/useBatch";
+import { TokenPanel, type VaultBalance } from "./TokenPanel";
 import { MarketPicker } from "./MarketPicker";
-
-type Stage = "idle" | "depositing" | "encrypting" | "submitting" | "submitted";
+import { SwapFlow, buildFlow, type LocalStage } from "./SwapFlow";
 
 const ONE = 10n ** 18n;
 
@@ -19,6 +24,10 @@ export function SwapCard({
   connecting,
   market,
   onSelectMarket,
+  batch,
+  limits,
+  secondsLeft,
+  onWatchBatch,
 }: {
   session: Session | null;
   onActivity: () => void;
@@ -27,42 +36,114 @@ export function SwapCard({
   connecting?: boolean;
   market: Market;
   onSelectMarket: (id: string) => void;
+  /// The batch this order is in, once there is one, otherwise the open batch.
+  batch: BatchView | null;
+  limits: BatchLimits | null;
+  secondsLeft: number;
+  onWatchBatch: (id: bigint | null) => void;
 }) {
   const [sellBase, setSellBase] = useState(true);
   const [amount, setAmount] = useState("");
-  const [stage, setStage] = useState<Stage>("idle");
-  const [sealed, setSealed] = useState(false);
+  const [stage, setStage] = useState<LocalStage>("idle");
+  const [failedAt, setFailedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [baseBal, setBaseBal] = useState<bigint | null>(null);
-  const [quoteBal, setQuoteBal] = useState<bigint | null>(null);
+  /// Set once an intent of ours is in `batch`. The page owns the id it polls;
+  /// this is the card's own record that the order is actually ours.
+  const [myBatch, setMyBatch] = useState<bigint | null>(null);
+
+  // Public, straight off the ERC-20. Always available, never needs a signature.
+  const [baseWallet, setBaseWallet] = useState<bigint | null>(null);
+  const [quoteWallet, setQuoteWallet] = useState<bigint | null>(null);
+
+  // Encrypted, behind the Handle Gateway.
+  const [baseVault, setBaseVault] = useState<VaultBalance>({ kind: "idle" });
+  const [quoteVault, setQuoteVault] = useState<VaultBalance>({ kind: "idle" });
 
   const sellToken = sellBase ? market.base : market.quote;
   const buyToken = sellBase ? market.quote : market.base;
 
-  useEffect(() => {
+  // ------------------------------------------------------------- balances
+
+  const loadWallets = useCallback(async () => {
     if (!session) return;
-    let dead = false;
-    (async () => {
-      try {
-        const [b, q] = await Promise.all([
-          session.hashswap.balanceHandleOf(market.base.address, session.address),
-          session.hashswap.balanceHandleOf(market.quote.address, session.address),
-        ]);
-        const [bv, qv] = await Promise.all([
-          tryDecrypt(session.handleClient, b),
-          tryDecrypt(session.handleClient, q),
-        ]);
-        if (dead) return;
-        setBaseBal(bv?.value ?? null);
-        setQuoteBal(qv?.value ?? null);
-      } catch {
-        /* leave unknown */
-      }
-    })();
-    return () => {
-      dead = true;
-    };
-  }, [session, stage]);
+    try {
+      const [b, q] = await Promise.all([
+        session.base.balanceOf(session.address),
+        session.quote.balanceOf(session.address),
+      ]);
+      setBaseWallet(b);
+      setQuoteWallet(q);
+    } catch {
+      /* RPC hiccup; the next stage change retries */
+    }
+  }, [session]);
+
+  /// Read both encrypted vault balances.
+  ///
+  /// Sequential on purpose. The first `decrypt` of the hour asks the wallet to
+  /// sign an EIP-712 data-access authorisation; the SDK caches it, so the second
+  /// read is free. Running the pair concurrently — which is what this did — put
+  /// two signature requests up at once, wallets dropped the second, and both
+  /// balances came back unreadable with nothing on screen to say why.
+  ///
+  /// A declined signature stops the sequence rather than prompting again for the
+  /// other token, since the answer is not going to be different.
+  const loadVaults = useCallback(async () => {
+    if (!session) return;
+
+    const toBalance = (r: Awaited<ReturnType<typeof readHandle>>): VaultBalance =>
+      r.status === "ok"
+        ? { kind: "ready", value: r.value }
+        : r.status === "locked"
+          ? { kind: "locked", reason: r.reason }
+          : r.status === "denied"
+            ? { kind: "denied", reason: r.reason }
+            : { kind: "error", reason: r.reason };
+
+    setBaseVault({ kind: "loading" });
+    setQuoteVault({ kind: "loading" });
+
+    const baseHandle = await session.hashswap.balanceHandleOf(market.base.address, session.address);
+    const b = await readHandle(session.handleClient, baseHandle);
+    setBaseVault(toBalance(b));
+
+    if (b.status === "locked") {
+      setQuoteVault({ kind: "locked", reason: b.reason });
+      return;
+    }
+
+    const quoteHandle = await session.hashswap.balanceHandleOf(market.quote.address, session.address);
+    setQuoteVault(toBalance(await readHandle(session.handleClient, quoteHandle)));
+  }, [session, market.base.address, market.quote.address]);
+
+  useEffect(() => {
+    if (!session) {
+      setBaseWallet(null);
+      setQuoteWallet(null);
+      setBaseVault({ kind: "idle" });
+      setQuoteVault({ kind: "idle" });
+      setMyBatch(null);
+      setStage("idle");
+      return;
+    }
+    loadWallets();
+    loadVaults().catch(() => {
+      /* readHandle does not throw; this guards the contract reads */
+      setBaseVault({ kind: "error", reason: "Could not reach the contract" });
+      setQuoteVault({ kind: "error", reason: "Could not reach the contract" });
+    });
+  }, [session, loadWallets, loadVaults]);
+
+  // Both sides move on every settled transaction, so refresh when one lands.
+  useEffect(() => {
+    if (stage === "idle" || stage === "queued") {
+      loadWallets();
+      loadVaults().catch(() => undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
+
+  // ---------------------------------------------------------- derived math
 
   const parsed = (() => {
     try {
@@ -72,8 +153,32 @@ export function SwapCard({
     }
   })();
 
-  const sellBal = sellBase ? baseBal : quoteBal;
-  const short = sellBal !== null && parsed > sellBal;
+  const sellWallet = sellBase ? baseWallet : quoteWallet;
+  const sellVault = sellBase ? baseVault : quoteVault;
+  const vaultHeld = sellVault.kind === "ready" ? sellVault.value : null;
+
+  /// What `submitIntent` will actually try to debit, which is not always what
+  /// was typed.
+  ///
+  /// Sellers post base collateral one for one. Buyers lock quote at the
+  /// reference price plus `BUFFER_BPS`, since the clearing price does not exist
+  /// yet. Checking the face amount for a buy therefore under-counts by 5%, and
+  /// `_debit` does not revert on a shortfall — it contributes zero and lets the
+  /// intent join the batch anyway. The order would look placed and do nothing.
+  const required = sellBase ? parsed : (parsed * (limits?.bufferBps ?? BUFFER_BPS_FALLBACK)) / 10_000n;
+
+  /// How much still has to be deposited before this order can be placed.
+  ///
+  /// When the vault balance is unreadable we assume nothing is in there. That is
+  /// the safe direction to be wrong in: the worst case is a deposit the user did
+  /// not strictly need, rather than a submitted intent with no collateral behind
+  /// it, which is what happened when an unreadable balance silently disabled the
+  /// deposit path altogether.
+  const topUp =
+    required === 0n ? 0n : vaultHeld === null ? required : required > vaultHeld ? required - vaultHeld : 0n;
+  const needsDeposit = topUp > 0n;
+  const alreadyFunded = parsed > 0n && !needsDeposit;
+  const cannotAfford = needsDeposit && sellWallet !== null && topUp > sellWallet;
 
   // Live estimate from Uniswap's QuoterV2, debounced so typing does not spam
   // the RPC. This is what the trade would fetch executed alone right now; the
@@ -100,8 +205,8 @@ export function SwapCard({
         });
         if (!dead) setEstimate(amountOut as bigint);
       } catch {
-        // Pool unreachable or the amount exceeds available liquidity — fall back
-        // to the reference price so the field is never blank.
+        // Pool unreachable or the amount exceeds available liquidity, so fall
+        // back to the reference price and never leave the field blank.
         if (!dead && refPrice) {
           setEstimate(sellBase ? (parsed * refPrice) / ONE : (parsed * ONE) / refPrice);
         }
@@ -111,80 +216,200 @@ export function SwapCard({
       dead = true;
       clearTimeout(t);
     };
-  }, [session, parsed, sellBase, refPrice]);
+  }, [session, parsed, sellBase, refPrice, market]);
 
-  async function deposit() {
-    if (!session || parsed === 0n) return;
-    setStage("depositing");
+  // ------------------------------------------------------------- actions
+
+  const fail = (step: string, e: any) => {
+    setError(explain(e));
+    setFailedAt(step);
+    setStage("idle");
+  };
+
+  /// Approve then deposit, as two visible steps. They are two transactions and
+  /// either can be rejected on its own, so the flow names whichever one it is.
+  async function fund() {
+    if (!session || topUp === 0n) return;
     setError(null);
-    try {
-      const token = sellBase ? session.base : session.quote;
-      const addr = sellBase ? market.base.address : market.quote.address;
+    setFailedAt(null);
 
-      // These are real Sepolia tokens — there is no mint to fall back on, so a
-      // short wallet balance has to be surfaced rather than papered over.
+    const token = sellBase ? session.base : session.quote;
+    const addr = sellBase ? market.base.address : market.quote.address;
+
+    try {
+      // Real Sepolia tokens, with no mint to fall back on, so a short wallet
+      // balance has to be surfaced rather than papered over.
       const held: bigint = await token.balanceOf(session.address);
-      if (held < parsed) {
+      if (held < topUp) {
         throw new Error(
-          `You hold ${formatUnits(held, sellToken.decimals, 4)} ${sellToken.symbol} — acquire more before depositing.`,
+          `You hold ${formatUnits(held, sellToken.decimals, 4)} ${sellToken.symbol}, and this needs ${formatUnits(topUp, sellToken.decimals, 4)}. Acquire more before depositing.`,
         );
       }
+    } catch (e: any) {
+      return fail("approving", e);
+    }
 
-      await (await token.approve(market.hashswap, parsed)).wait();
-      await (await session.hashswap.deposit(addr, parsed)).wait();
+    try {
+      setStage("approving");
+
+      // Skip a redundant approval. An allowance left over from an attempt that
+      // failed at the deposit step is still perfectly good, and asking for a
+      // second signature to set it to the same value is just friction.
+      const existing: bigint = await token.allowance(session.address, market.hashswap);
+      if (existing < topUp) {
+        await (await token.approve(market.hashswap, topUp)).wait();
+
+        // Then wait until the allowance actually reads back.
+        //
+        // This is what was breaking the deposit. Having the receipt is not the
+        // same as every RPC node having the state: Sepolia behind a load
+        // balancer will happily serve the pre-approval allowance for a second
+        // or two afterwards. The wallet estimates gas for `deposit` against
+        // that stale view, sees ERC20InsufficientAllowance, and warns that the
+        // transaction will fail — which is the point at which it gets
+        // cancelled.
+        let seen = existing;
+        for (let i = 0; i < 12 && seen < topUp; i++) {
+          await new Promise((r) => setTimeout(r, 700));
+          seen = await token.allowance(session.address, market.hashswap);
+        }
+        if (seen < topUp) {
+          throw new Error(
+            "The approval is confirmed but this RPC endpoint has not caught up yet. Wait a moment and press Deposit again.",
+          );
+        }
+      }
+    } catch (e: any) {
+      return fail("approving", e);
+    }
+
+    try {
+      setStage("depositing");
+
+      // Simulate first.
+      //
+      // Without this the first sign that anything is wrong is the wallet
+      // warning that the transaction will fail, with no reason attached, and the
+      // only sensible response is to cancel it — which is exactly the dead end
+      // this kept hitting. `staticCall` runs the same code against the same
+      // state and hands back the revert reason, before anyone is asked to sign.
+      try {
+        await session.hashswap.deposit.staticCall(addr, topUp);
+      } catch (sim: any) {
+        throw new Error(`The deposit would revert: ${explain(sim)}`);
+      }
+
+      await (await session.hashswap.deposit(addr, topUp)).wait();
       setStage("idle");
       onActivity();
     } catch (e: any) {
-      setError(e?.shortMessage ?? e?.message ?? String(e));
-      setStage("idle");
+      return fail("depositing", e);
     }
   }
 
   async function submit() {
     if (!session || parsed === 0n) return;
     setError(null);
-    setSealed(false);
+    setFailedAt(null);
+    // A new order starts the lifecycle over rather than appending to the last
+    // one's finished state.
+    setMyBatch(null);
+    onWatchBatch(null);
+
+    let amt: any;
+    let side: any;
     try {
-      setStage("encrypting");
+      setStage("sealing");
       const isBuy = !sellBase;
       const baseAmount = isBuy && refPrice ? (parsed * ONE) / refPrice : parsed;
 
-      const amt = await session.handleClient.encryptInput(baseAmount, "uint256", market.hashswap);
-      const side = await session.handleClient.encryptInput(isBuy, "bool", market.hashswap);
-      setSealed(true);
+      amt = await session.handleClient.encryptInput(baseAmount, "uint256", market.hashswap);
+      side = await session.handleClient.encryptInput(isBuy, "bool", market.hashswap);
+    } catch (e: any) {
+      return fail("sealing", e);
+    }
 
+    try {
       setStage("submitting");
+      // Captured before the call: this is the batch the intent lands in, and it
+      // is what the lifecycle follows afterwards. Reading it later would race
+      // the batch closing and start tracking the wrong one.
+      const target: bigint = await session.hashswap.currentBatchId();
       await (
         await session.hashswap.submitIntent(amt.handle, amt.handleProof, side.handle, side.handleProof)
       ).wait();
 
-      setStage("submitted");
+      setMyBatch(target);
+      onWatchBatch(target);
+      setStage("queued");
       setAmount("");
       onActivity();
     } catch (e: any) {
-      setError(e?.shortMessage ?? e?.message ?? String(e));
-      setStage("idle");
+      return fail("submitting", e);
     }
   }
 
-  const busy = stage !== "idle" && stage !== "submitted";
+  // --------------------------------------------------------------- render
+
+  const busy = stage === "approving" || stage === "depositing" || stage === "sealing" || stage === "submitting";
 
   const label = connecting
-    ? "Connecting…"
+    ? "Connecting"
     : !session
-    ? "Connect wallet"
-    : parsed === 0n
-      ? "Enter an amount"
-      : short
-        ? "Insufficient balance"
-        : stage === "encrypting"
-          ? "Sealing order"
-          : stage === "submitting"
-            ? "Submitting"
-            : "Place private order";
+      ? "Connect wallet"
+      : parsed === 0n
+        ? "Enter an amount"
+        : cannotAfford
+          ? `Not enough ${sellToken.symbol}`
+          : stage === "approving"
+            ? "Approving"
+            : stage === "depositing"
+              ? "Depositing"
+              : stage === "sealing"
+                ? "Sealing order"
+                : stage === "submitting"
+                  ? "Submitting"
+                  : needsDeposit
+                    ? `Deposit ${formatUnits(topUp, sellToken.decimals, 4)} ${sellToken.symbol}`
+                    : "Place private order";
+
+  const submitted = myBatch !== null;
+  const showFlow = stage !== "idle" || parsed > 0n || submitted;
+
+  // Evaluated on the client only; `cryptoUnavailable` returns null during SSR so
+  // the first paint matches.
+  const insecure = cryptoUnavailable();
+
+  /// What to say about an order that is already in. Follows the batch rather
+  /// than freezing on whatever was true at the moment of submission.
+  const receipt = !submitted
+    ? null
+    : batch?.status === 2
+      ? {
+          text: `Filled at ${formatUnits(batch.clearingPrice, 18, 4)}. Your fill stays encrypted.`,
+          tone: "var(--green)",
+        }
+      : batch?.status === 1
+        ? { text: "Batch closed. The residual is settling on Uniswap now.", tone: "var(--muted)" }
+        : batch?.status === 3
+          ? { text: "That batch was cancelled and your collateral was returned.", tone: "var(--amber)" }
+          : { text: "Order placed. It clears when the batch closes.", tone: "var(--green)" };
+
+  const steps = buildFlow({
+    stage,
+    market,
+    sellSymbol: sellToken.symbol,
+    amount,
+    alreadyFunded,
+    failedAt,
+    submitted,
+    batch,
+    limits,
+    secondsLeft,
+  });
 
   return (
-    <div className="surface" style={{ width: "100%", maxWidth: 440 }}>
+    <div className="glass-strong" style={{ width: "100%", maxWidth: 440 }}>
       <div className="flex items-center justify-between px-5 pt-5">
         <h2 className="text-[16px] font-bold tracking-tight">Swap</h2>
         <span className="tag">
@@ -193,11 +418,22 @@ export function SwapCard({
       </div>
 
       <div className="p-5">
+        {/* Nothing below this works without Web Crypto, so it is said once, at
+            the top, rather than as four identical failures further down. */}
+        {insecure && (
+          <div
+            className="surface px-3 py-2.5 mb-3 text-[11px] leading-relaxed"
+            style={{ color: "var(--amber)", borderColor: "var(--red-dim)" }}
+          >
+            {insecure}
+          </div>
+        )}
+
         <div className="mb-3">
           <MarketPicker market={market} onSelect={onSelectMarket} disabled={busy} />
         </div>
 
-        {/* One asset in, another out, with a flip between them — the AMM idiom.
+        {/* One asset in, another out, with a flip between them: the AMM idiom.
             There is no order book here to buy or sell into, so buy/sell tabs
             were describing the contract's internal side flag rather than
             anything the trader does. */}
@@ -207,8 +443,10 @@ export function SwapCard({
             token={sellToken}
             value={amount}
             onChange={setAmount}
-            balance={sellBal}
-            busy={stage === "encrypting"}
+            wallet={sellWallet}
+            vault={sellVault}
+            onUnlock={() => loadVaults().catch(() => undefined)}
+            busy={stage === "sealing"}
           />
 
           <div className="relative" style={{ height: 6 }}>
@@ -237,7 +475,9 @@ export function SwapCard({
             token={buyToken}
             sealed
             estimate={estimate}
-            balance={sellBase ? quoteBal : baseBal}
+            wallet={sellBase ? quoteWallet : baseWallet}
+            vault={sellBase ? quoteVault : baseVault}
+            onUnlock={() => loadVaults().catch(() => undefined)}
           />
         </div>
 
@@ -250,41 +490,49 @@ export function SwapCard({
                   {formatUnits(estimate, buyToken.decimals, 4)} {buyToken.symbol}
                 </>
               ) : (
-                "—"
+                <span style={{ color: "var(--faint)" }}>Enter an amount</span>
               )
             }
           />
-          <Row label="Final price" value="set when the batch clears" />
-          <Row label="Settles in" value="~90 seconds" />
+          {/* Where the money comes from. `submitIntent` moves no tokens — it
+              debits the vault — so with a funded vault the trade takes two
+              clicks and no transfer, and it is not obvious what paid for it. */}
+          {parsed > 0n && (
+            <Row
+              label={sellBase ? "Collateral" : "Quote locked"}
+              value={
+                <span style={{ color: alreadyFunded ? "var(--muted)" : "var(--amber)" }}>
+                  {formatUnits(required, sellToken.decimals, 4)} {sellToken.symbol}
+                  {alreadyFunded ? " from your vault" : " to deposit"}
+                </span>
+              }
+            />
+          )}
+          <Row label="Final price" value="Set when the batch clears" />
+          <Row
+            label="Settles in"
+            value={limits ? `~${limits.win}s once the batch fills` : "~90 seconds"}
+          />
           <Row label="Front-running risk" value={<span style={{ color: "var(--red)" }}>None</span>} />
         </div>
 
-        {short && parsed > 0n && (
-          <button className="btn btn-line w-full mt-5" disabled={busy} onClick={deposit}>
-            {stage === "depositing" ? "Depositing…" : `Deposit ${amount} ${sellToken.symbol}`}
-          </button>
-        )}
-
-        {/* One button, three jobs — connect, then deposit if short, then trade.
-            Disabling it while disconnected would strand the user with no
-            obvious next step, which is why the card owns connection too. */}
+        {/* One button, one job at a time: connect, then fund if the vault is
+            short, then trade. Disabling it while disconnected would strand the
+            user with no obvious next step, which is why the card owns
+            connection too. */}
         <button
-          className="btn btn-red mt-3"
-          disabled={session ? parsed === 0n || short || busy : connecting}
-          onClick={session ? submit : onConnect}
+          className="btn btn-red mt-5"
+          disabled={session ? parsed === 0n || cannotAfford || busy : connecting}
+          onClick={session ? (needsDeposit ? fund : submit) : onConnect}
         >
           {label}
         </button>
 
-        {sealed && stage !== "idle" && (
-          <p className="fade-up text-[12px] mt-4 text-center" style={{ color: "var(--muted)" }}>
-            Order sealed. The network sees a 32-byte reference — no amount, no side.
-          </p>
-        )}
-
-        {stage === "submitted" && (
-          <p className="fade-up text-[13px] mt-4 text-center" style={{ color: "var(--green)" }}>
-            Order placed. It clears when the batch closes.
+        {/* Status-aware, because "It clears when the batch closes" was still on
+            screen long after the batch had closed, cleared and settled. */}
+        {submitted && receipt && (
+          <p className="fade-up text-[13px] mt-4 text-center" style={{ color: receipt.tone }}>
+            {receipt.text}
           </p>
         )}
 
@@ -292,6 +540,12 @@ export function SwapCard({
           <p className="text-[12px] mono mt-4" style={{ color: "var(--red)" }}>
             {error}
           </p>
+        )}
+
+        {showFlow && (
+          <div className="mt-6">
+            <SwapFlow steps={steps} />
+          </div>
         )}
       </div>
     </div>

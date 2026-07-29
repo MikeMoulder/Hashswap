@@ -2,65 +2,121 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { short, type Session } from "@/lib/hashswap";
-import { Mark } from "./Footer";
+import { useEffect, useState } from "react";
+import { CONNECT_REQUEST, type Session } from "@/lib/hashswap";
+import { ThemeToggle } from "./ThemeToggle";
+import { WalletPicker } from "./WalletPicker";
+import { AccountMenu } from "./AccountMenu";
 
-/// Shared navigation. On the marketing page the primary action is "Launch app";
-/// once you are inside the app it becomes the wallet control, so there is never
-/// more than one red element competing for attention.
+/// Floating navigation.
+///
+/// A detached pill rather than a full-width band, so the animated grid runs
+/// behind and past it instead of being sliced off by an opaque strip. The
+/// wordmark carries the identity on its own — a logo mark next to a five-letter
+/// name was redundant at this size.
+
+const LINKS = [
+  { href: "/home", label: "Home" },
+  { href: "/", label: "Trade" },
+  { href: "/docs", label: "Docs" },
+  { href: "/terms", label: "Terms" },
+];
+
 export function Nav({
   session,
   onConnect,
   connecting,
+  error,
+  onDisconnect,
 }: {
   session: Session | null;
   onConnect: (rdns?: string) => void;
   connecting?: boolean;
+  error?: string | null;
+  onDisconnect?: () => void;
 }) {
   const path = usePathname();
-  const onSwap = path?.startsWith("/swap");
+
+  // The picker lives here because the nav is the one component on every page.
+  // Anything else that needs it fires `requestConnect()`.
+  const [picking, setPicking] = useState(false);
+  useEffect(() => {
+    const open = () => setPicking(true);
+    window.addEventListener(CONNECT_REQUEST, open);
+    return () => window.removeEventListener(CONNECT_REQUEST, open);
+  }, []);
+
+  // Close on success only — a failed connect leaves the sheet up with the error,
+  // so the user can pick a different wallet without reopening it.
+  useEffect(() => {
+    if (session) setPicking(false);
+  }, [session]);
+
+  // The bar tightens once you scroll — it announces itself at rest and gets out
+  // of the way in use. `passive` because this fires constantly and must never
+  // block scrolling.
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 12);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   return (
-    <nav
-      className="sticky top-0 z-20"
-      style={{
-        borderBottom: "1px solid var(--line)",
-        background: "rgba(8,8,10,0.86)",
-        backdropFilter: "blur(14px)",
-      }}
+    <div
+      className="sticky z-30 flex justify-center px-4"
+      style={{ top: 0, paddingTop: scrolled ? 8 : 12, transition: "padding-top 0.3s ease" }}
     >
-      <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-2.5">
-          <Mark />
-          <span className="text-[15px] font-bold tracking-tight">HashSwap</span>
+      <nav className="nav-pill" data-scrolled={scrolled}>
+        <span className="sheen-clip" aria-hidden>
+          <span className="sheen" />
+        </span>
+        <Link
+          href="/"
+          className="text-[15px] font-semibold tracking-tight shrink-0"
+          style={{ letterSpacing: "-0.02em" }}
+        >
+          HashSwap
         </Link>
 
-        <div className="hidden md:flex items-center gap-8 text-[13px] font-medium">
-          <Link href="/#how" style={{ color: "var(--muted)" }}>
-            How it works
-          </Link>
-          <Link href="/#private" style={{ color: "var(--muted)" }}>
-            Privacy
-          </Link>
-          <Link href="/swap" style={{ color: onSwap ? "var(--paper)" : "var(--muted)" }}>
-            Trade
-          </Link>
+        <div className="hidden sm:flex items-center gap-1">
+          {LINKS.map((l) => (
+            <Link key={l.href} href={l.href} className="nav-link" data-active={path === l.href}>
+              {l.label}
+            </Link>
+          ))}
         </div>
 
-        {onSwap ? (
-          session ? (
-            <span className="tag mono">{short(session.address, 6)}</span>
-          ) : (
-            <button className="btn btn-line" onClick={() => onConnect()} disabled={connecting}>
-              {connecting ? "Connecting…" : "Connect wallet"}
-            </button>
-          )
+        <div className="flex items-center gap-2 shrink-0">
+          <ThemeToggle />
+
+        {session ? (
+          <AccountMenu
+            session={session}
+            onDisconnect={onDisconnect}
+            onSwitch={() => setPicking(true)}
+          />
         ) : (
-          <Link href="/swap" className="btn btn-red" style={{ width: "auto", padding: "10px 20px", fontSize: 13 }}>
-            Launch app
-          </Link>
+          <button
+            className="btn btn-line"
+            style={{ borderRadius: 999, padding: "8px 16px" }}
+            onClick={() => setPicking(true)}
+            disabled={connecting}
+          >
+            {connecting ? "Connecting…" : "Connect wallet"}
+          </button>
         )}
-      </div>
-    </nav>
+        </div>
+      </nav>
+
+      <WalletPicker
+        open={picking}
+        onClose={() => setPicking(false)}
+        onSelect={onConnect}
+        connecting={connecting}
+        error={error}
+      />
+    </div>
   );
 }

@@ -333,6 +333,88 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
       "the unfunded 500 must not appear in the netting totals",
     );
   });
+
+  // ------------------------------------------------- buy-side collateral (F7)
+
+  // Buys lock quote at refPrice * BUFFER_BPS, not at refPrice, because the
+  // clearing price does not exist yet. That 5% is easy to forget on the client,
+  // and forgetting it is expensive precisely because nothing reverts: `_debit`
+  // answers a shortfall with zero, the intent still increments `count`, and the
+  // user pays gas for an order that silently did not happen.
+  //
+  // Both sides of the boundary are asserted. A test for the shortfall alone
+  // would still pass if buys were broken outright.
+
+  const buyQuote = (baseAmount: bigint, bps: bigint) =>
+    (baseAmount * ((REF_PRICE * bps) / 10_000n)) / WAD;
+
+  /// Leave `keep` quote in wallet 5's vault and nothing more.
+  async function trimQuoteTo(keep: bigint) {
+    const held = await balance(quote, users[4]);
+    await hashswap.write.requestWithdraw([quote.address, held - keep], {
+      account: wallets[5].account,
+    });
+    await hashswap.write.finalizeWithdraw([1n, boolProof(true)]);
+    assert.equal(await balance(quote, users[4]), keep);
+  }
+
+  it("a buy collateralised at only the face amount contributes zero", async () => {
+    // 10 base at the reference price is 20,000 quote, but the contract wants
+    // 21,000. One wei short is the same as empty.
+    await trimQuoteTo(buyQuote(10n * ONE, 10_000n));
+
+    await submit(5, 10n * ONE, true); // must contribute nothing
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    const b = await hashswap.read.getBatch([1n]);
+    assert.equal(Number(b.count), 4, "the intent still joins the batch — refusing it would leak solvency");
+    assert.equal(
+      await nox.read.peek([b.residualHandle]),
+      2n * ONE,
+      "an under-collateralised buy must not reach the netting totals",
+    );
+    assert.equal(
+      (await nox.read.peek([b.sellSideHandle])) === 1n,
+      true,
+      "totals must read 10 sell against 8 buy, not 18 buy",
+    );
+  });
+
+  it("a buy collateralised at BUFFER_BPS is accepted in full", async () => {
+    await trimQuoteTo(buyQuote(10n * ONE, 10_500n));
+
+    await submit(5, 10n * ONE, true); // exactly funded — must count
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    const b = await hashswap.read.getBatch([1n]);
+    assert.equal(
+      await nox.read.peek([b.residualHandle]),
+      8n * ONE,
+      "18 buy against 10 sell leaves 8",
+    );
+    assert.equal(
+      (await nox.read.peek([b.sellSideHandle])) === 1n,
+      false,
+      "net buy pressure once the buy is counted",
+    );
+  });
+
+  it("BUFFER_BPS is readable, so clients need not hardcode it", async () => {
+    // The frontend has to know this number to size a deposit. Reading it beats
+    // copying it: a client copy that drifts below the contract's produces orders
+    // that look placed and do nothing.
+    assert.equal(await hashswap.read.BUFFER_BPS(), 10_500n);
+  });
   // ------------------------------------------------------- stuck-batch liveness
 
   // MIN_BATCH_SIZE means a quiet market can roll a batch forever. Without an

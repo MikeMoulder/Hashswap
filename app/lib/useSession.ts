@@ -29,6 +29,14 @@ export function useSession() {
     [marketId],
   );
 
+  /// Drop the session locally. EIP-1193 has no "log out" — the wallet keeps its
+  /// permission grant, so reconnecting will not re-prompt. Revoking access for
+  /// real is done from the wallet, not from us.
+  const close = useCallback(() => {
+    setSession(null);
+    setError(null);
+  }, []);
+
   const selectMarket = useCallback(
     async (id: string) => {
       setMarketId(id);
@@ -47,5 +55,6 @@ export function useSession() {
     error,
     connecting,
     connect: open,
+    disconnect: close,
   };
 }

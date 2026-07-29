@@ -9,8 +9,11 @@ const COLUMNS: Array<{ head: string; items: Array<{ label: string; href?: string
   {
     head: "Protocol",
     items: [
-      { label: "How clearing works", href: "#how" },
-      { label: "Verify privacy", href: "#verify" },
+      // Both of these were bare fragments left over from the single-page
+      // layout. `#verify` had no target at all and `#how` only resolves on
+      // /home, so from the trade page they did nothing.
+      { label: "How clearing works", href: "/home#how" },
+      { label: "Test privacy", href: "/docs#verify" },
       { label: "Uniswap v3", href: "https://docs.uniswap.org" },
     ],
   },
@@ -85,7 +88,7 @@ export function Footer() {
 
         <div className="flex flex-wrap items-center justify-between gap-4 text-[12px]" style={{ color: "var(--faint)" }}>
           <span>Testnet software. Not audited. Do not use with real funds.</span>
-          <span>Uniswap is unmodified — HashSwap only calls it.</span>
+          <span>Uniswap is unmodified. HashSwap only calls it.</span>
         </div>
       </div>
     </footer>
