@@ -1,11 +1,10 @@
 # HashSwap
 
-**Confidential batch-netting over an unmodified Uniswap v3 pool, built on [Nox](https://docs.noxprotocol.io).**
+**Confidential batch-netting over unmodified Uniswap v3 pools, built on [Nox](https://docs.noxprotocol.io).**
 
-Users submit encrypted swap intents. HashSwap aggregates them into an encrypted
-batch, crosses offsetting orders against each other inside Nox, and decrypts and
-settles **only the net residual** against the real pool. Everyone clears at one
-uniform price.
+Orders are sealed before they leave your browser. HashSwap collects them into a
+batch, crosses offsetting orders against each other privately, and sends **only
+the net difference** to Uniswap. Everyone in the batch clears at that one price.
 
 > Built for the iExec **WTF Hackathon — Summer Edition**.
 
@@ -13,152 +12,121 @@ uniform price.
 
 ## The problem
 
-Every swap on Uniswap is public before it executes, and that single fact causes
-three compounding harms:
+Every swap on Uniswap is public before it executes.
 
-- **MEV.** Your pending swap sits in the mempool with its amount and slippage
-  visible. Bots front-run and back-run it.
-- **Information leakage.** Your address, size, and direction are permanently
-  legible. Positions get inferred, strategies leak.
-- **No private execution.** Uniswap has no confidential mode and no hidden
-  resting orders.
+- **MEV.** Your pending order sits in the mempool with its amount visible. Bots
+  trade ahead of it.
+- **Leakage.** Your address, size and direction are permanently legible.
+- **No private execution.** Uniswap has no confidential mode.
 
-Existing "private swap" attempts either fork the AMM — breaking composability —
-or merely relay transactions, hiding the sender but not the amount, and doing
-nothing about MEV.
+Existing attempts either fork the AMM — breaking composability — or merely relay
+transactions, hiding the sender but not the amount, and doing nothing about MEV.
 
 ## The idea
 
-**Privacy and better execution are the same feature.** If swaps are encrypted
-until settlement, there is nothing to sandwich. And if you batch encrypted
-swaps, you can net offsetting orders against each other before touching the
-pool, so most volume never becomes public at all.
+**Privacy and better execution are the same feature.** If orders are sealed until
+settlement there is nothing to front-run. And if you batch sealed orders, most of
+them cancel out before touching the pool — so the majority of volume never
+becomes public at all.
 
 ---
 
 ## Live on Sepolia
 
-| Contract | Address |
-|---|---|
-| **HashSwap** | [`0xb27b0a0f47e5ca1f1daec32bcfbfc7310fa3d31f`](https://sepolia.etherscan.io/address/0xb27b0a0f47e5ca1f1daec32bcfbfc7310fa3d31f) |
-| **Uniswap v3 pool** | [`0xC645F52C30E0B1fbe81Cef0a6fA661B8AA95FEe0`](https://sepolia.etherscan.io/address/0xC645F52C30E0B1fbe81Cef0a6fA661B8AA95FEe0) |
-| Uniswap SwapRouter02 | [`0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E`](https://sepolia.etherscan.io/address/0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E) |
-| hBASE | [`0x22f6abe62bcd5f9c31dabba4b580d2eb6b07fcfe`](https://sepolia.etherscan.io/address/0x22f6abe62bcd5f9c31dabba4b580d2eb6b07fcfe) |
-| hQUOTE | [`0x64fbde826c6f086c4f52733e01251a37bf9bd021`](https://sepolia.etherscan.io/address/0x64fbde826c6f086c4f52733e01251a37bf9bd021) |
+Three markets, each a separate HashSwap deployment, each settling against a
+**pre-existing Uniswap v3 pool we neither created nor control**.
 
-The pool is a **genuine Uniswap v3 deployment** — created through Uniswap's own
-factory, liquidity minted through their position manager, settlement routed
-through the canonical SwapRouter02. None of those contracts is forked, wrapped,
-or modified. Only the token pair is synthetic, because no Sepolia pair carries
-usable depth.
+| Market | HashSwap | Uniswap pool | Fee |
+|---|---|---|---|
+| **WETH / LINK** | [`0x5b4ec99d…8ae1bf`](https://sepolia.etherscan.io/address/0x5b4ec99d6db1b3368b0d99f055fd3056128ae1bf) | [`0xA470a353…58B88a`](https://sepolia.etherscan.io/address/0xA470a353577901AA8cDCb828BB616ef41d58B88a) | 1% |
+| WETH / DAI | [`0x908a1df1…8189a0`](https://sepolia.etherscan.io/address/0x908a1df1e6fb011b12a2aac7d47bb0100e8189a0) | [`0x60439363…906d2C`](https://sepolia.etherscan.io/address/0x60439363146Fc0F633388B4402082Cd673906d2C) | 1% |
+| LINK / USDC | [`0x38cc21d6…7cde67`](https://sepolia.etherscan.io/address/0x38cc21d63084a59a3571116e8f097f41617cde67) | [`0x2d021e62…3d49C2c`](https://sepolia.etherscan.io/address/0x2d021e62D1aE41946846462d4bD8A85BB3d49C2c) | 0.3% |
 
-A full batch has settled through it against the **real NoxCompute singleton and
-the real Handle Gateway**:
+Settlement routes through Uniswap's canonical
+[`SwapRouter02`](https://sepolia.etherscan.io/address/0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E)
+and prices through their
+[`QuoterV2`](https://sepolia.etherscan.io/address/0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3).
+Real tokens throughout — canonical Sepolia WETH, LINK, DAI, USDC.
 
-```
-3 encrypted intents   sell 6 + sell 4 + buy 8   = 18 gross volume
-residual to Uniswap   2 hBASE
-clearing price        1993.20
-pool tick             76012 -> 76004      (the residual actually traded)
-```
-
-Sixteen of the eighteen never reached the market.
-
-
----
-
-## The demo
-
-```bash
-npm install
-npx hardhat run scripts/demo/run-both.ts
-```
-
-The same trade, twice — once naked, once through HashSwap:
+**A batch that actually settled**, against the real WETH/LINK pool:
 
 ```
-  LANE A — naked swap on Uniswap
-  ────────────────────────────────────────────────────────────
-  fair value (empty block)        19,743.16 QUOTE
-  actually received               14,953.76 QUOTE
-  extracted by sandwich            4,789.40 QUOTE
-  attacker profit                    1.6498 BASE
+sell 0.006 WETH   gas 766,504
+sell 0.004 WETH   gas 754,364
+buy  0.008 WETH   gas 754,376
+closed
+residual          0.002 WETH, sell
+settled           gas 947,648
 
-  LANE B — encrypted intent through HashSwap
-  ────────────────────────────────────────────────────────────
-  what the mempool sees      0x0000007a692301000000…
-  gross batch volume                  18.00 BASE
-  reached the pool                     2.00 BASE
-  received                        19,900.32 QUOTE
-  extracted by sandwich                0.00 QUOTE
-
-  SAVED  4,946.55 QUOTE
-  89% of batch volume never touched the public pool
+gross order flow  0.018 WETH
+reached the pool  0.002 WETH
+internalised      88.9%
+clearing price    231.28 LINK
 ```
 
-In Lane B the attacker's bot inspects the mempool and finds a 32-byte handle.
-There is nothing to act on.
+The pool's balance moved by **exactly the residual**. The other 88.9% settled
+between traders inside the contract at the same price, paying neither slippage
+nor the LP fee.
 
 ---
 
 ## How it works
 
 ```
-encrypted intents ──▶ HashSwap  (incremental encrypted aggregation)
-                          │
-                   closeBatch()   C = min(B,S)      R = |B−S|
-                          │       allowPublicDecryption(R)
-                          ▼
-              keeper: publicDecrypt(R) → { value, gateway proof }
-                          │
-                   settle(R, proof)  ← Nox.publicDecrypt verifies on-chain
-                          │
-                   ONE swap of R on real Uniswap  ──▶  P_clear = Q_uni·WAD/R
-                          │
-                   encrypted per-user fills at P_clear
+1  DEPOSIT   you → HashSwap      real tokens in, credited as an encrypted balance
+
+2  ORDER     you → HashSwap      amount + side sealed at the Nox gateway.
+                                 Encrypted balance debited, folded into
+                                 encrypted running totals.  NO TOKENS MOVE.
+
+3  CLOSE     keeper              crossed  = min(buys, sells)
+                                 residual = |buys − sells|
+                                 only the residual is made decryptable
+
+4  RESOLVE   keeper              fetches the residual + a gateway signature (~7s)
+
+5  SETTLE    HashSwap → Uniswap  signature verified on-chain FIRST, then ONE
+                                 exactInputSingle for the residual.
+                                 Price paid becomes everyone's price.
+
+6  FILL      HashSwap            all participants credited at that price,
+                                 encrypted — only they can read their own
 ```
+
+Steps 1–4 are bookkeeping over ciphertext; Uniswap has no idea we exist. Only
+step 5 touches it, once, with the leftover.
 
 ### Settlement is two transactions
 
-Uniswap's `exactInputSingle` takes a plain `uint256`, so the residual must be
-decrypted before settlement. That is the design, not a leak:
+`exactInputSingle` takes a plain `uint256`, so the residual must be decrypted.
+That is the design, not a leak:
 
 > **The net residual is the only number that ever becomes public. Individual
-> intent amounts and sides never are.**
+> orders never are.**
 
-`closeBatch()` computes `R` privately and marks it publicly decryptable. An
-off-chain keeper fetches the plaintext plus a gateway signature and calls
-`settle()`, which verifies that signature on-chain via `Nox.publicDecrypt`
-**before** touching Uniswap. A keeper reporting a false residual reverts.
+`settle()` verifies a gateway signature via `Nox.publicDecrypt` **before**
+touching Uniswap, so a keeper reporting a false residual reverts.
 
 ### The clearing price
 
-The batch executes `R` on Uniswap for `Q_uni` quote and prices the whole batch at
-
-```
-P_clear = Q_uni · WAD / R
-```
-
-Conservation is exact by construction: quote in from buyers minus quote out to
-sellers equals `(B − S)·P_clear = Q_uni`, precisely what the pool exchanged.
-
-Crossed volume `C` skips pool slippage *and* the LP fee entirely — that is the
-netting surplus, delivered through the price rather than a separate rebate
-mechanism.
+The batch executes residual `R` for `Q` quote tokens and prices the whole batch
+at `P_clear = Q · WAD / R`. Conservation is exact: quote in from buyers minus
+quote out to sellers equals `(B − S)·P_clear = Q`, precisely what the pool
+exchanged.
 
 **When `R = 0`** — a perfect coincidence of wants — no Uniswap trade happens at
-all, and the batch leaves zero on-chain trace in the pool.
+all and the batch leaves zero trace in the pool.
 
 ### Matching is branchless Solidity
 
 Nox is **TEE-based, not FHE**. The Runner is a generic arithmetic service, not a
 place you deploy code — so the netting algorithm is ordinary Solidity over
-encrypted types, with every conditional expressed as `Nox.select`. You can read
-the matching logic and check it yourself; its confidentiality comes from an
-attested Intel TDX enclave rather than from trusting us.
+encrypted types, every conditional expressed as `Nox.select`. You can read the
+matching logic and check it; its confidentiality comes from an attested Intel TDX
+enclave, not from trusting us.
 
 ```solidity
-// contracts/lib/BatchMath.sol — the whole netting primitive, 3 lines
+// contracts/lib/BatchMath.sol — the whole netting primitive
 sellSide = Nox.lt(totalBuy, totalSell);
 crossed  = Nox.select(sellSide, totalBuy, totalSell);
 residual = Nox.add(Nox.sub(totalBuy, crossed), Nox.sub(totalSell, crossed));
@@ -173,183 +141,199 @@ adding them yields `|B−S|` with no second comparison and no underflow.
 
 | Primitive | Where |
 |---|---|
-| **Handles** (`euint256`, `ebool`) | Every intent amount, side, balance, and fill |
+| **Handles** (`euint256`, `ebool`) | Every order amount, side, balance, fill |
 | **`fromExternal` + input proofs** | `submitIntent` — plaintext never enters calldata |
-| **Branchless `select`/`lt`/`add`/`sub`** | `BatchMath.netOf` — the matching engine |
-| **`mul`/`div`** | Quote locking and per-user fill computation |
-| **`safeSub`** (→ `ebool` success) | Solvency checks that cannot revert or leak |
+| **Branchless `select`/`lt`/`add`/`sub`** | `BatchMath.netOf`, the matching engine |
+| **`mul`/`div`** | Quote locking, per-user fills, maker spread |
+| **`safeSub`** (→ `ebool` success) | Solvency checks that neither revert nor leak |
 | **ACLs** (`allowThis`, `allow`) | Re-granted on every derived handle, every tx |
 | **`allowPublicDecryption`** | The residual and its direction, at close |
 | **`Nox.publicDecrypt(handle, proof)`** | On-chain verification of the keeper's claim |
-| **Handle Gateway SDK** | `encryptInput` client-side, `publicDecrypt` in the keeper |
+| **Handle Gateway SDK** | `encryptInput` in the browser, `publicDecrypt` in the keeper |
 
 ## What we did *not* modify
 
-**Uniswap is untouched.** Not forked, not redeployed, not wrapped in a custom
-pool, and entirely unaware HashSwap exists.
+**Uniswap is untouched.** Not forked, not redeployed, not wrapped. The pools were
+already there — created by strangers, used by strangers. In the last few thousand
+blocks the WETH/LINK pool saw swaps from unrelated addresses alongside ours.
 
 The entire integration surface is one file —
-[`contracts/lib/UniswapAdapter.sol`](contracts/lib/UniswapAdapter.sol), about 40
-lines — exposing two calls:
+[`contracts/lib/UniswapAdapter.sol`](contracts/lib/UniswapAdapter.sol), ~40 lines
+— exposing two calls: `exactInputSingle` for a net-sell residual and
+`exactOutputSingle` for a net-buy, since the residual is denominated in base units.
 
-- `exactInputSingle` for a net-sell residual
-- `exactOutputSingle` for a net-buy residual (the residual is denominated in base
-  units, so a buy needs exact-output)
-
-The Uniswap interfaces in `contracts/interfaces/` are hand-written and minimal.
-That is not stylistic: Uniswap v3-periphery is pinned to Solidity 0.7.6 and Nox
-requires `^0.8.35`, so the packages cannot coexist in one project.
+Uniswap interfaces in `contracts/interfaces/` are hand-written and minimal. Not
+stylistic: Uniswap v3-periphery is pinned to Solidity 0.7.6 and Nox requires
+`^0.8.35`, so the packages cannot coexist.
 
 ---
 
-## Privacy: what is hidden, and what is not
+## Privacy: what is hidden, what is not
 
-**Hidden.** Intent amounts. Intent sides. Per-user fills. Per-user balances.
-Which participant contributed to which side of the batch.
+**Hidden.** Order amounts. Order direction. Per-user fills. Per-user balances.
+Which participant contributed to which side.
 
-**Public, by design or necessity.**
+**Public.** The net residual and its direction. The clearing price. That an
+address took part. Deposit and withdrawal amounts.
 
-- **The net residual and its direction.** Uniswap requires a plaintext amount.
-  This is the single value the system reveals per batch.
-- **The clearing price.** The residual swap is a public transaction, so its
-  realized price is public regardless.
-- **Participation.** `submitIntent` is a transaction from a public address.
-  Encryption hides *what* you traded, not *that* you traded.
-- **Deposits and withdrawals.** Amounts are public; the link between a deposit
-  and any specific intent is what breaks.
+### Why orders move no tokens
 
-### Why intents move no tokens
+This is the failure mode that would otherwise sink the design. If `submitIntent`
+pulled funds with `transferFrom(user, amount)`, the ERC-20 `Transfer` event would
+publish the amount, and *which* token moved would publish the direction. Every
+handle in the system would be decoration — one `eth_getLogs` would reconstruct
+the order book.
 
-This is the failure mode that would otherwise sink the whole design. If
-`submitIntent` pulled funds with `transferFrom(user, amount)`, the ERC-20
-`Transfer` event would publish the exact amount, and *which* token moved would
-publish the direction. Every encrypted handle would be decoration — one
-`eth_getLogs` call would reconstruct the order book.
+So funding is decoupled from trading. Users deposit ahead of time and orders
+debit an encrypted balance. `submitIntent` moves no tokens at all.
 
-So funding is decoupled from trading. Users deposit into a confidential balance
-ahead of time, and intents debit that encrypted balance via `Nox.safeSub`.
-`submitIntent` moves no tokens at all.
+### Verified on live Sepolia, two independent wallets
+
+```
+I5  ✓ order amount absent from calldata
+    ✓ order amount absent from logs
+    calldata is 516 bytes: a selector, two handles, two proofs
+
+I6  A's balance handle admins: HashSwap, A
+    B's balance handle admins: HashSwap, B
+    ✓ B has no rights over A's balance      ✓ A has no rights over B's
+    ✓ A decrypted its own balance           ✓ A cannot read B's
+```
+
+Run it yourself: `npx hardhat run scripts/privacy-audit.ts --network sepolia`
+
+---
+
+## Market maker of last resort
+
+A batch needs three orders before it can clear, which is fine at volume and
+painful on day one. `setMaker(address, feeBps)` installs a maker paid a spread
+around the clearing price — sellers receive slightly less, buyers pay slightly
+more, the difference accrues to the maker. Capped at 50 bps; zero address
+disables it entirely. `scripts/maker.ts` posts balanced two-sided clips when a
+batch is about to expire under-filled, ending roughly flat.
+
+**This buys liveness, not privacy — and the distinction matters.** A maker
+padding a batch that contains one real user can subtract its own known orders and
+derive that user's position exactly. The public still learns nothing; the maker
+learns everything. That is the bargain an RFQ dealer offers. It is a legitimate
+product and an illegitimate thing to leave unsaid.
 
 ---
 
 ## Known limitations
 
-Stated plainly, because every one of these is a real constraint a reviewer would
-find anyway.
+**Privacy is bounded by batch size.** The anonymity set *is* the batch. At N=1 the
+residual would equal that user's entire trade, which is why `MIN_BATCH_SIZE` is 3
+and under-filled batches roll over rather than settle. The check counts *orders*,
+not *addresses* — so self-filling satisfies it without providing real privacy.
+No contract check can manufacture other people's flow.
 
-**Privacy is bounded by batch size.** The anonymity set *is* the batch. At N=1
-the residual would equal that user's entire trade, which is why `MIN_BATCH_SIZE`
-is enforced at 3 and under-filled batches roll over rather than settle. Privacy
-scales with participation, as in every batch-privacy system. Our contribution is
-that the per-batch leak is exactly one number instead of every order.
+**The cold-start problem is real.** At low volume users wait on strangers who may
+never arrive. The maker above is the mitigation; the proper fix is a shielded
+deposit pool, where the anonymity set accumulates over time instead of having to
+coincide. That needs note-based balances and zk membership proofs — Nox's Runner
+is not programmable, so there is no TEE shortcut. Estimated 2–4 weeks, not a
+patch.
 
 **Uniform pricing is fair, not free.** All participants clear at one price, which
-removes any intra-batch ordering advantage — the CoW Protocol fairness model. It
-does **not** guarantee every participant beats a solo trade. In a one-sided batch
-(`crossed == 0`) a small trader pays the aggregate's average price, which is
-worse than trading alone. Crossed volume always wins; the residual is fair, not
-free. Encrypted limit prices are the intended fix and are not yet implemented.
+removes any intra-batch ordering advantage. It does **not** guarantee everyone
+beats a solo trade: in a one-sided batch (`crossed == 0`) a small trader pays the
+aggregate's average price, which is worse than trading alone. Crossed volume
+always wins; the residual is fair, not free.
 
 **Keeper honesty is enforced; keeper ordering is not.** The keeper cannot forge a
 residual — `Nox.publicDecrypt` verifies a gateway signature on-chain. But it
-learns `R` in plaintext before submitting, so it could position its own
-transaction around the settlement swap. The `minOut` bound limits the damage;
-removing the trust entirely needs commit-reveal or a permissionless keeper set.
-The demo keeper currently passes an unbounded limit, which is safe against the
-mock pool and **is not safe against the live one** — the keeper currently passes
-an unbounded limit, which must be replaced with a TWAP-derived bound before this
-handles real value.
+learns `R` before submitting, so it could position around the settlement swap.
+The current keeper passes an unbounded slippage limit, which is fine on a testnet
+and **must** be replaced with a TWAP-derived bound before real value.
 
-**Gas.** `submitIntent` costs ~760k gas — about 17 Nox ops at ~45k each, since
-every operation is an external call into the NoxCompute singleton. The
-quote-locking `mul`+`div` is a meaningful share and is the obvious optimisation
-target. `closeBatch` is O(1) by design (240k regardless of batch size) because
-aggregation happens incrementally at submit time.
-
-**`MAX_BATCH_SIZE` is 8.** `settle` costs ~910k for 3 intents and extrapolates to
-~2.2M at 8 — comfortably inside a block, but the ceiling is real.
-
-**Viewer grants are irrevocable.** Nox ACLs have no revocation. Cutting off
-access requires rotating to a fresh handle.
-
-**Buyers lock a buffered quote amount** (105% of a public reference price) and are
-refunded the remainder at settlement. If the clearing price moves beyond the
-buffer, the refund clamps rather than making the vault insolvent — the buyer is
-under-refunded instead.
-
-**Encryption is server-side.** `encryptInput` sends plaintext to the Handle
-Gateway over an attested HTTPS channel; ECIES encryption happens inside the TEE.
-The guarantee rests on Intel TDX attestation, not on the client holding keys.
-
-**The token pair is synthetic.** The Uniswap pool, factory, position manager and
-router are all the real Sepolia deployments, but hBASE/hQUOTE are our own ERC-20s
-— no testnet pair has enough liquidity to demonstrate netting against. The pool
-is seeded with 5,000 hBASE / 10,000,000 hQUOTE.
+**Gas.** `submitIntent` costs ~760k — roughly 17 Nox ops at ~45k each, since every
+operation is an external call into the NoxCompute singleton. `closeBatch` is O(1)
+(240k regardless of batch size) because aggregation happens incrementally at
+submit time. `settle` is ~950k for three orders.
 
 **One market per deployment.** `baseToken`, `quoteToken` and `poolFee` are
-immutable constructor arguments, so an instance serves exactly one pair. Adding
-markets means deploying more instances behind a registry — straightforward, but
-not built.
+immutable, so each market is its own instance behind a registry.
+
+**Testnet pools are priced arbitrarily.** WETH/DAI genuinely thinks 1 WETH is 6.2M
+DAI. The markets function correctly; the rates are not real-world. The UI flags
+those with an `ODD RATE` badge rather than hiding it.
+
+**Viewer grants are irrevocable.** Nox ACLs have no revocation — cutting off
+access requires rotating to a fresh handle.
+
+**Encryption is server-side.** `encryptInput` sends plaintext to the Handle
+Gateway over an attested channel; ECIES happens inside the TEE. The guarantee is
+Intel TDX attestation, not client-held keys.
+
+**The Nox gateway is intermittently flaky.** Both `encryptInput` and `decrypt`
+occasionally fail transiently and succeed on retry.
 
 ---
 
 ## Testing
 
 ```bash
-npx hardhat test          # 43 passing
+npx hardhat test          # 48 passing
 ```
 
 Tests run against `MockNoxCompute`, a plaintext implementation of the
 `INoxCompute` interface etched at the local NoxCompute address, so `Nox.sol`
-executes unmodified without Docker. It faithfully models transient ACL semantics
-via `tstore`/`tload`, which is what lets it catch the most common Nox bug —
-forgetting `Nox.allowThis` after an operation.
+executes unmodified without Docker. It models transient ACL semantics via
+`tstore`/`tload`, which is what lets it catch the most common Nox bug — a missing
+`Nox.allowThis` after an operation.
 
 **It does not model confidentiality, gas, async handle resolution, or proof
 verification.** Those were verified separately on Sepolia:
 
 | | |
 |---|---|
-| Handle resolution latency | ~7s (2 polls) |
+| Handle resolution latency | ~7s |
 | Gas per Nox op | ~45k |
 | Proof verification on-chain | ✅ real gateway signature accepted by `settle` |
-| Netting result | 2 base residual — identical to the local prediction |
+| Netting result | matched the local prediction exactly |
 
 Notable coverage: a failed debit leaves the balance untouched (`safeSub` returns
 `(false, 0)`, not the original — assigning it unconditionally would wipe
-balances); an unfunded intent contributes zero without bricking the batch; an
-unsettled batch refunds everyone after a timeout; an intent can be withdrawn from
-a batch that never fills; a withdrawn intent is neither filled nor
-double-refunded.
+balances); an unfunded order contributes zero without bricking the batch; an
+unsettled batch refunds everyone after a timeout; an order can be withdrawn from
+a batch that never fills; a withdrawn order is neither filled nor double-refunded;
+the maker does not pay the spread it earns.
 
-## Running it yourself
+## Running it
 
 ```bash
 npm install
-cp .env.example .env          # add SEPOLIA_RPC_URL + DEPLOYER_PRIVATE_KEY
+cp .env.example .env      # SEPOLIA_RPC_URL + DEPLOYER_PRIVATE_KEY
 
-npx hardhat test                                          # local suite
-npx hardhat run scripts/demo/run-both.ts                  # the demo
-npx hardhat run scripts/deploy.ts       --network sepolia # deploy
-npx hardhat run scripts/submit-batch.ts --network sepolia # submit + close
-npx hardhat run scripts/keeper.ts       --network sepolia # settle
+npx hardhat test                                            # local suite
+npx hardhat run scripts/demo/run-both.ts                    # sandwich comparison
+MARKET=WETH-LINK npx hardhat run scripts/run-market.ts --network sepolia
+npx hardhat run scripts/privacy-audit.ts --network sepolia
+npx hardhat run scripts/keeper.ts --network sepolia         # settles all markets
+npx hardhat run scripts/maker.ts  --network sepolia         # fills thin batches
+
+cd app && npm run dev                                       # the interface
 ```
 
 Run the keeper in a real terminal — node block-buffers stdout when piped, and a
-redirected keeper looks dead while it is in fact working.
+redirected keeper looks dead while it is working.
 
 ## Layout
 
 ```
 contracts/
-  HashSwap.sol          batch lifecycle, netting, settlement, cancel
-  HashSwapVault.sol     confidential balances, two-phase withdrawal
-  lib/BatchMath.sol     branchless netting primitives
+  HashSwap.sol            batch lifecycle, netting, settlement, maker, cancel
+  HashSwapVault.sol       confidential balances, two-phase withdrawal
+  lib/BatchMath.sol       branchless netting primitives
   lib/UniswapAdapter.sol  ← the entire Uniswap integration
-  interfaces/           minimal hand-written Uniswap interfaces
-  mocks/                MockNoxCompute, MockSwapRouter, MockERC20
+  interfaces/             minimal hand-written Uniswap interfaces
+  mocks/                  MockNoxCompute, MockSwapRouter, MockERC20
 scripts/
-  deploy.ts  keeper.ts  submit-batch.ts  probe-sepolia.ts
-  demo/run-both.ts      the side-by-side comparison
-test/                   43 tests
+  deploy-markets.ts  acquire-tokens.ts  run-market.ts
+  keeper.ts  maker.ts  privacy-audit.ts  fill-batch.ts
+  demo/run-both.ts        the sandwich comparison
+app/                      Next.js interface — landing + swap
+test/                     48 tests
 ```

@@ -417,4 +417,104 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
       "withdrawn intent must receive nothing at settlement",
     );
   });
+  // ------------------------------------------------------- maker of last resort
+
+  // A maker paid to always take the other side is what stops a low-volume batch
+  // waiting on strangers who may never arrive. It buys liveness, not privacy:
+  // a maker padding a batch with one real user can subtract its own orders and
+  // derive that user's position. The contract documents that; these tests only
+  // check the economics.
+
+  it("only the owner can configure the maker", async () => {
+    await assert.rejects(
+      hashswap.write.setMaker([users[4], 10], { account: wallets[2].account }),
+      "a stranger must not be able to install a maker",
+    );
+    await hashswap.write.setMaker([users[4], 10]);
+    assert.equal((await hashswap.read.maker()).toLowerCase(), users[4].toLowerCase());
+    assert.equal(await hashswap.read.makerFeeBps(), 10);
+  });
+
+  it("the maker fee is capped", async () => {
+    const cap = await hashswap.read.MAX_MAKER_FEE_BPS();
+    await assert.rejects(hashswap.write.setMaker([users[4], cap + 1]));
+    await hashswap.write.setMaker([users[4], cap]);
+    assert.equal(await hashswap.read.makerFeeBps(), cap);
+  });
+
+  it("with no maker set, fills are unchanged", async () => {
+    const before = await balance(quote, users[0]);
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+    const b = await hashswap.read.getBatch([1n]);
+    const residual = await nox.read.peek([b.residualHandle]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true), 0n]);
+
+    const price = (await hashswap.read.getBatch([1n])).clearingPrice;
+    assert.equal(
+      await balance(quote, users[0]),
+      before + (6n * ONE * price) / WAD,
+      "seller should receive the full clearing value when no maker is configured",
+    );
+  });
+
+  it("the maker accrues the spread from every other participant", async () => {
+    const MAKER = users[4];
+    const FEE = 25n; // bps
+    await hashswap.write.setMaker([MAKER, Number(FEE)]);
+    const makerBefore = await balance(quote, MAKER);
+    const sellerBefore = await balance(quote, users[0]);
+
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+    const b = await hashswap.read.getBatch([1n]);
+    const residual = await nox.read.peek([b.residualHandle]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true), 0n]);
+
+    const price = (await hashswap.read.getBatch([1n])).clearingPrice;
+
+    // Seller of 6 receives the clearing value less the spread.
+    const gross = (6n * ONE * price) / WAD;
+    const fee = (gross * FEE) / 10_000n;
+    assert.equal(
+      await balance(quote, users[0]),
+      sellerBefore + gross - fee,
+      "seller should be short exactly the spread",
+    );
+
+    assert.ok(
+      (await balance(quote, MAKER)) > makerBefore,
+      "maker should have accrued the spread",
+    );
+  });
+
+  it("the maker does not pay the spread on its own orders", async () => {
+    const MAKER = users[0]; // wallet 1 is both maker and a participant
+    await hashswap.write.setMaker([MAKER, 25]);
+    const before = await balance(quote, MAKER);
+
+    await submit(1, 6n * ONE, false); // the maker's own sell
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+    const b = await hashswap.read.getBatch([1n]);
+    const residual = await nox.read.peek([b.residualHandle]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true), 0n]);
+
+    const price = (await hashswap.read.getBatch([1n])).clearingPrice;
+    const ownFill = (6n * ONE * price) / WAD;
+
+    // Its own fill is untaxed, and it also collects the spread from the others.
+    assert.ok(
+      (await balance(quote, MAKER)) > before + ownFill,
+      "maker should keep its full fill and collect the others' spread",
+    );
+  });
 });

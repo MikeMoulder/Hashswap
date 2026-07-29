@@ -68,10 +68,11 @@ async function main() {
   await network.connect();
 
   const provider = new ethers.JsonRpcProvider((process.env.SEPOLIA_RPC_URL ?? "").trim());
-  const signer = new ethers.Wallet(
-    "0x" + (process.env.DEPLOYER_PRIVATE_KEY ?? "").trim().replace(/^0x/, ""),
-    provider,
-  );
+  // The keeper holds no capital and cannot steal — the residual it submits is
+  // signature-verified on-chain — so it runs on its own hot key, separate from
+  // the deployer's admin key. Falls back only if operators were never split.
+  const key = (process.env.KEEPER_PRIVATE_KEY ?? process.env.DEPLOYER_PRIVATE_KEY ?? "").trim();
+  const signer = new ethers.Wallet("0x" + key.replace(/^0x/, ""), provider);
   const hc = await createEthersHandleClient(signer as any);
 
   const markets = registry.markets.map((m: any) => ({

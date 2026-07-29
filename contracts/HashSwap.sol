@@ -74,6 +74,17 @@ contract HashSwap is HashSwapVault {
         bool withdrawn;
     }
 
+    /// @dev Encrypted constants shared across one batch's fills.
+    struct FillCtx {
+        euint256 zero;
+        euint256 priceWad;
+        euint256 wad;
+        euint256 bps;
+        euint256 feeRate;
+        address mk;
+        uint16 feeBps;
+    }
+
     struct Batch {
         uint64 openedAt;
         uint64 closedAt;
@@ -94,6 +105,27 @@ contract HashSwap is HashSwapVault {
     uint24 public immutable poolFee;
     ISwapRouter02 public immutable swapRouter;
 
+    /// @notice Who may configure the maker. Set once, at deployment.
+    address public immutable owner;
+
+    /// @notice Market maker of last resort — an address paid to always be on the
+    ///         other side of a batch so it clears instead of waiting for
+    ///         strangers. Optional: zero disables the mechanism entirely.
+    ///
+    /// @dev **This trades privacy for liveness and the tradeoff must be
+    ///      disclosed.** A maker padding a batch that contains one real user can
+    ///      subtract its own orders and derive that user's position exactly. The
+    ///      public still learns nothing; the maker learns everything. That is the
+    ///      same bargain an RFQ dealer offers, and it is only honest if stated.
+    address public maker;
+
+    /// @notice Spread taken around the clearing price, in basis points, paid to
+    ///         the maker. Capped so the operator cannot quietly tax a batch to
+    ///         death.
+    uint16 public makerFeeBps;
+
+    uint16 public constant MAX_MAKER_FEE_BPS = 50; // 0.5%
+
     uint256 public currentBatchId;
     mapping(uint256 => Batch) private _batches;
     mapping(uint256 => Intent[]) private _intents;
@@ -106,6 +138,8 @@ contract HashSwap is HashSwapVault {
         uint256 indexed batchId, uint256 residual, bool residualIsSell, uint256 clearingPrice
     );
     event BatchCancelled(uint256 indexed batchId);
+    event MakerUpdated(address indexed maker, uint16 feeBps);
+    event MakerPaid(uint256 indexed batchId, address indexed maker);
     event BatchRolledOver(uint256 indexed batchId, uint32 count);
 
     error BatchNotOpen();
@@ -116,6 +150,8 @@ contract HashSwap is HashSwapVault {
     error WindowNotElapsed();
     error TimeoutNotElapsed();
     error ResidualMismatch();
+    error NotOwner();
+    error FeeTooHigh();
 
     constructor(
         address baseToken_,
@@ -128,7 +164,21 @@ contract HashSwap is HashSwapVault {
         quoteToken = quoteToken_;
         poolFee = poolFee_;
         swapRouter = swapRouter_;
+        owner = msg.sender;
         _openBatch(initialRefPrice);
+    }
+
+    // ------------------------------------------------------------------- admin
+
+    /// @notice Configure the maker of last resort.
+    /// @param maker_ Address to pay, or zero to disable the mechanism.
+    /// @param feeBps Spread around the clearing price, capped at MAX_MAKER_FEE_BPS.
+    function setMaker(address maker_, uint16 feeBps) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (feeBps > MAX_MAKER_FEE_BPS) revert FeeTooHigh();
+        maker = maker_;
+        makerFeeBps = feeBps;
+        emit MakerUpdated(maker_, feeBps);
     }
 
     // ------------------------------------------------------------------ intake
@@ -343,34 +393,78 @@ contract HashSwap is HashSwapVault {
     ///      one-sided batch (`crossed == 0`) a small trader pays the aggregate's
     ///      average price, which is worse than trading alone. Crossed volume
     ///      always wins; the residual is fair, not free (build.md F5).
+    ///
+    ///      When a maker is configured, a spread is taken around `P_clear`:
+    ///      sellers receive slightly less, buyers pay slightly more, and the
+    ///      difference accrues to the maker. That is what pays someone to always
+    ///      be on the other side, so a batch clears instead of waiting for
+    ///      strangers who may never arrive.
     function _distribute(uint256 batchId, uint256 clearingPrice) private {
         Intent[] storage list = _intents[batchId];
-        euint256 zero = Nox.toEuint256(0);
-        euint256 priceWad = Nox.toEuint256(clearingPrice);
-        euint256 wad = Nox.toEuint256(WAD);
+
+        // Shared encrypted constants live in a memory struct so the per-intent
+        // work can sit in its own stack frame. Inlining it all blows the Yul
+        // stack limit — every Nox op holds a live local, and there are a dozen
+        // per fill.
+        FillCtx memory c = FillCtx({
+            zero: Nox.toEuint256(0),
+            priceWad: Nox.toEuint256(clearingPrice),
+            wad: Nox.toEuint256(WAD),
+            bps: Nox.toEuint256(10_000),
+            feeRate: Nox.toEuint256(makerFeeBps),
+            mk: maker,
+            feeBps: makerFeeBps
+        });
+
+        euint256 accrued = c.zero;
+        bool anyFee = false;
 
         for (uint256 i = 0; i < list.length; i++) {
-            Intent storage it = list[i];
-            if (it.withdrawn) continue; // already refunded at withdrawal time
+            if (list[i].withdrawn) continue; // already refunded at withdrawal
 
-            euint256 amount = euint256.wrap(it.amount);
-            ebool isBuy = ebool.wrap(it.isBuy);
-            euint256 locked = euint256.wrap(it.quoteLocked);
-
-            euint256 quoteValue = Nox.div(Nox.mul(amount, priceWad), wad);
-
-            // Buyer: receives base, refunded the unspent portion of their lock.
-            // Clamped by safeSub so a price above the buffer under-fills the
-            // refund rather than making the vault insolvent.
-            (ebool refundOk, euint256 refundRaw) = Nox.safeSub(locked, quoteValue);
-            euint256 refund = Nox.select(refundOk, refundRaw, zero);
-
-            euint256 baseOut = Nox.select(isBuy, amount, zero);
-            euint256 quoteOut = Nox.select(isBuy, refund, quoteValue);
-
-            _credit(baseToken, it.user, baseOut);
-            _credit(quoteToken, it.user, quoteOut);
+            (euint256 fee, bool charged) = _fillOne(list[i], c);
+            if (charged) {
+                accrued = Nox.add(accrued, fee);
+                anyFee = true;
+            }
         }
+
+        if (anyFee) {
+            _credit(quoteToken, c.mk, accrued);
+            emit MakerPaid(batchId, c.mk);
+        }
+    }
+
+    /// @dev Fill a single participant, returning the maker spread taken from it.
+    function _fillOne(Intent storage it, FillCtx memory c)
+        private
+        returns (euint256 fee, bool charged)
+    {
+        euint256 amount = euint256.wrap(it.amount);
+        ebool isBuy = ebool.wrap(it.isBuy);
+
+        euint256 quoteValue = Nox.div(Nox.mul(amount, c.priceWad), c.wad);
+        euint256 sellerGets = quoteValue;
+        euint256 buyerOwes = quoteValue;
+
+        // The maker does not pay the spread it earns. This branches on a plain
+        // address, not on ciphertext — who the maker is was never secret, so no
+        // encrypted comparison is needed.
+        charged = c.feeBps > 0 && c.mk != address(0) && it.user != c.mk;
+        if (charged) {
+            fee = Nox.div(Nox.mul(quoteValue, c.feeRate), c.bps);
+            sellerGets = Nox.sub(quoteValue, fee);
+            buyerOwes = Nox.add(quoteValue, fee);
+        }
+
+        // Buyer receives base and is refunded the unspent portion of the lock.
+        // `safeSub` clamps so a clearing price beyond the buffer under-refunds
+        // rather than making the vault insolvent.
+        (ebool refundOk, euint256 refundRaw) = Nox.safeSub(euint256.wrap(it.quoteLocked), buyerOwes);
+        euint256 refund = Nox.select(refundOk, refundRaw, c.zero);
+
+        _credit(baseToken, it.user, Nox.select(isBuy, amount, c.zero));
+        _credit(quoteToken, it.user, Nox.select(isBuy, refund, sellerGets));
     }
 
     // ------------------------------------------------------------------ cancel
