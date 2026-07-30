@@ -5,6 +5,7 @@ import { ethers } from "ethers";
 // runtime (SubgraphOutOfSyncError and GatewayTrustError are type-only). Importing
 // them is a hard ESM failure, so match them by name instead.
 import { createEthersHandleClient, NotYetComputedHandleError } from "@iexec-nox/handle";
+import { deriveParticipant, ensureGas } from "./lib/participants.js";
 
 /// The experiment that retires the project's biggest risk.
 ///
@@ -74,30 +75,62 @@ async function main() {
   await send("deposit base", hashswap.write.deposit([base.address, 100n * ONE]));
   await send("deposit quote", hashswap.write.deposit([quote.address, 1_000_000n * ONE]));
 
-  // ---- three encrypted intents -------------------------------------------
+  // ---- three encrypted intents, from three addresses ----------------------
   // Sell 6 + sell 4 vs buy 8 -> 8 crosses internally, 2 reaches the pool.
+  //
+  // One intent per address per batch (build.md F19), so each of these is a
+  // distinct participant. That also makes the measured gas honest: the
+  // per-address bookkeeping is part of what a real submission costs.
   const intents: Array<[bigint, boolean]> = [
     [6n * ONE, false],
     [4n * ONE, false],
     [8n * ONE, true],
   ];
 
+  const HS_ABI = [
+    "function deposit(address,uint256)",
+    "function submitIntent(bytes32,bytes,bytes32,bytes) returns (uint256)",
+  ];
+  const ERC_ABI = ["function approve(address,uint256) returns (bool)"];
+
   const gasPerIntent: bigint[] = [];
-  for (const [amount, isBuy] of intents) {
+  for (const [i, [amount, isBuy]] of intents.entries()) {
+    // Participant 1 is the operator, who is already funded and deposited above.
+    const party =
+      i === 0 ? signer : deriveParticipant(signer.address, provider, i + 1);
+
+    if (party !== signer) {
+      await ensureGas(signer, party, { log: (m, d) => log(m, d ?? "") });
+
+      // Mock tokens are freely mintable, so fund the participant directly.
+      const collateral = isBuy ? quote : base;
+      const need = isBuy ? amount * 4000n : amount;
+      await send(`mint party ${i + 1}`, collateral.write.mint([party.address as `0x${string}`, need]));
+
+      const token = new ethers.Contract(
+        isBuy ? quote.address : base.address,
+        ERC_ABI,
+        party,
+      );
+      const vault = new ethers.Contract(hashswap.address, HS_ABI, party);
+      await (await token.approve(hashswap.address, need)).wait();
+      await (await vault.deposit(isBuy ? quote.address : base.address, need)).wait();
+    }
+
+    // The handle proof is bound to (owner, app), so each participant encrypts
+    // with their own client.
+    const partyHc = i === 0 ? hc : await createEthersHandleClient(party as any);
+
     const t0 = Date.now();
-    const amt = await hc.encryptInput(amount, "uint256", hashswap.address);
-    const side = await hc.encryptInput(isBuy, "bool", hashswap.address);
+    const amt = await partyHc.encryptInput(amount, "uint256", hashswap.address);
+    const side = await partyHc.encryptInput(isBuy, "bool", hashswap.address);
     log("encryptInput x2", `${Date.now() - t0}ms`);
 
-    const r = await send(
-      `submitIntent ${isBuy ? "buy" : "sell"} ${amount / ONE}`,
-      hashswap.write.submitIntent([
-        amt.handle,
-        amt.handleProof,
-        side.handle,
-        side.handleProof,
-      ]),
-    );
+    const vault = new ethers.Contract(hashswap.address, HS_ABI, party);
+    const r = await (
+      await vault.submitIntent(amt.handle, amt.handleProof, side.handle, side.handleProof)
+    ).wait();
+    log(`submitIntent ${isBuy ? "buy" : "sell"} ${amount / ONE}`, `gas ${r.gasUsed}`);
     gasPerIntent.push(r.gasUsed);
   }
 

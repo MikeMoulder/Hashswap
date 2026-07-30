@@ -38,9 +38,13 @@ Three markets, each a separate HashSwap deployment, each settling against a
 
 | Market | HashSwap | Uniswap pool | Fee |
 |---|---|---|---|
-| **WETH / LINK** | [`0x5b4ec99d…8ae1bf`](https://sepolia.etherscan.io/address/0x5b4ec99d6db1b3368b0d99f055fd3056128ae1bf) | [`0xA470a353…58B88a`](https://sepolia.etherscan.io/address/0xA470a353577901AA8cDCb828BB616ef41d58B88a) | 1% |
-| WETH / DAI | [`0x908a1df1…8189a0`](https://sepolia.etherscan.io/address/0x908a1df1e6fb011b12a2aac7d47bb0100e8189a0) | [`0x60439363…906d2C`](https://sepolia.etherscan.io/address/0x60439363146Fc0F633388B4402082Cd673906d2C) | 1% |
-| LINK / USDC | [`0x38cc21d6…7cde67`](https://sepolia.etherscan.io/address/0x38cc21d63084a59a3571116e8f097f41617cde67) | [`0x2d021e62…3d49C2c`](https://sepolia.etherscan.io/address/0x2d021e62D1aE41946846462d4bD8A85BB3d49C2c) | 0.3% |
+| **WETH / LINK** | [`0xe866c380…58de75`](https://sepolia.etherscan.io/address/0xe866c38005376d1cc55c62fcc4ebf3ea4258de75) | [`0xA470a353…58B88a`](https://sepolia.etherscan.io/address/0xA470a353577901AA8cDCb828BB616ef41d58B88a) | 1% |
+| WETH / DAI | [`0x79a33856…f2d93f`](https://sepolia.etherscan.io/address/0x79a338569ce3f7bc1bd54fd535b9d52bb6f2d93f) | [`0x60439363…906d2C`](https://sepolia.etherscan.io/address/0x60439363146Fc0F633388B4402082Cd673906d2C) | 1% |
+| LINK / USDC | [`0xfdbe193f…ffe838`](https://sepolia.etherscan.io/address/0xfdbe193fce0d46bf7042471ad6a76a8a45ffe838) | [`0x2d021e62…3d49C2c`](https://sepolia.etherscan.io/address/0x2d021e62D1aE41946846462d4bD8A85BB3d49C2c) | 0.3% |
+
+Redeployed Jul 30 with the audit fixes. Verify the build on-chain by reading
+`MAX_PRICE_DEVIATION_BPS()` — it returns `400` on the hardened contracts and does
+not exist on the earlier ones.
 
 Settlement routes through Uniswap's canonical
 [`SwapRouter02`](https://sepolia.etherscan.io/address/0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E)
@@ -51,18 +55,23 @@ Real tokens throughout — canonical Sepolia WETH, LINK, DAI, USDC.
 **A batch that actually settled**, against the real WETH/LINK pool:
 
 ```
-sell 0.006 WETH   gas 766,504
-sell 0.004 WETH   gas 754,364
-buy  0.008 WETH   gas 754,376
+seller-1  sell 0.006000 WETH    gas 789,084
+seller-2  sell 0.004002 WETH    gas 776,932
+buyer     buy  0.007998 WETH    gas 776,956
 closed
-residual          0.002 WETH, sell
-settled           gas 947,648
+residual                        0.002004 WETH, sell
+settled                         gas 990,422
 
-gross order flow  0.018 WETH
-reached the pool  0.002 WETH
-internalised      88.9%
-clearing price    231.28 LINK
+gross order flow   0.018 WETH
+reached the pool   0.002004 WETH
+internalised       88.9%
+clearing price     237.95 LINK   (reference 237.66 — inside the ±4% band)
 ```
+
+**Three separate wallets**, not one address trading with itself. The contract
+enforces one order per address per batch, so `MIN_BATCH_SIZE` counts distinct
+parties — a three-order batch from a single key would have an anonymity set of
+one, and is now rejected rather than quietly counted.
 
 The pool's balance moved by **exactly the residual**. The other 88.9% settled
 between traders inside the contract at the same price, paying neither slippage
@@ -282,10 +291,12 @@ batch is lost. A residual worth less than one wei of quote is absorbed instead.
 Closing the gap between those two needs a decimals-aware dust floor as a
 deployment parameter.
 
-**Gas.** `submitIntent` costs ~760k — roughly 17 Nox ops at ~45k each, since every
-operation is an external call into the NoxCompute singleton. `closeBatch` is O(1)
-(240k regardless of batch size) because aggregation happens incrementally at
-submit time. `settle` is ~950k for three orders.
+**Gas.** `submitIntent` costs ~790–803k — roughly 17 Nox ops at ~45k each, since
+every operation is an external call into the NoxCompute singleton. `closeBatch`
+is O(1) (240k regardless of batch size) because aggregation happens incrementally
+at submit time. `settle` is ~990k for three orders. Both rose slightly with the
+audit fixes: one extra `SSTORE` per submission for the per-address check, and the
+price-band arithmetic at settlement.
 
 **One market per deployment.** `baseToken`, `quoteToken` and `poolFee` are
 immutable, so each market is its own instance behind a registry.
@@ -323,10 +334,18 @@ verification.** Those were verified separately on Sepolia:
 
 | | |
 |---|---|
-| Handle resolution latency | ~7s |
-| Gas per Nox op | ~45k |
+| Handle resolution latency | ~7–15s, variable |
+| `encryptInput` round-trip | ~8–9s for a pair |
+| Gas per Nox op | ~46k |
 | Proof verification on-chain | ✅ real gateway signature accepted by `settle` |
 | Netting result | matched the local prediction exactly |
+
+Re-measured on the hardened build via `scripts/probe-sepolia.ts`: `submitIntent`
+789k/791k/791k, `closeBatch` 242k, `settle` 953k against the mock router (990k
+against the real pool — a live Uniswap swap costs more than a stand-in). Handle
+latency is worth budgeting generously for: it was ~7s during earlier runs and
+14.7s here, on an unchanged contract. The keeper polls with backoff rather than
+asking once, and a demo should not be paced as though the first read will land.
 
 Notable coverage: a failed debit leaves the balance untouched (`safeSub` returns
 `(false, 0)`, not the original — assigning it unconditionally would wipe

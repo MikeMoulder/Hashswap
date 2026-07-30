@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { network } from "hardhat";
 import { ethers } from "ethers";
 import { createEthersHandleClient } from "@iexec-nox/handle";
+import { deriveParticipant, ensureGas } from "./lib/participants.js";
 
 /// Top the current batch up to MIN_BATCH_SIZE so it can actually clear.
 ///
@@ -16,6 +17,11 @@ import { createEthersHandleClient } from "@iexec-nox/handle";
 /// The filler orders are deliberately opposing and roughly balanced, which also
 /// makes the demo show netting rather than a batch that simply dumps everything
 /// on the pool.
+///
+/// Each filler is a **separate address**. The contract allows one intent per
+/// address per batch (build.md F19), so fillers cannot share the operator key —
+/// and a batch padded from one wallet would not have satisfied `MIN_BATCH_SIZE`
+/// in spirit anyway, only in arithmetic.
 
 const ONE = 10n ** 18n;
 const log = (m: string, d = "") =>
@@ -59,29 +65,50 @@ async function main() {
     "0x" + (process.env.DEPLOYER_PRIVATE_KEY ?? "").trim().replace(/^0x/, ""),
     provider,
   );
-  const hc = await createEthersHandleClient(signer as any);
-
-  // Keep the vault funded — the filler needs collateral like anyone else.
-  const topUp = 200n * ONE;
-  await send("mint base", base.write.mint([me, topUp]));
-  await send("mint quote", quote.write.mint([me, topUp * 4000n]));
-  await send("approve base", base.write.approve([hashswap.address, topUp]));
-  await send("approve quote", quote.write.approve([hashswap.address, topUp * 4000n]));
-  await send("deposit base", hashswap.write.deposit([base.address, topUp]));
-  await send("deposit quote", hashswap.write.deposit([quote.address, topUp * 4000n]));
+  // Mock tokens are freely mintable, so each filler is funded directly rather
+  // than transferred to — one transaction instead of two.
+  const HS = [
+    "function deposit(address,uint256)",
+    "function submitIntent(bytes32,bytes,bytes32,bytes) returns (uint256)",
+  ];
+  const ERC = ["function approve(address,uint256) returns (bool)"];
 
   // Alternate sides so the batch has something to net against.
   for (let i = 0; i < missing; i++) {
     const isBuy = i % 2 === 0;
     const amount = (2n + BigInt(i)) * ONE;
 
+    // Filler index starts at 2 — participant 1 is the operator, who may already
+    // hold an intent in this batch.
+    const filler = deriveParticipant(signer.address, provider, i + 2);
+    await ensureGas(signer, filler, { log });
+
+    // Buyers post quote at the reference plus the contract's buffer; sellers post
+    // base. Mint generously — these are worthless test tokens.
+    const collateral = isBuy ? quote : base;
+    const need = isBuy ? amount * 4000n : amount;
+    await send(`mint filler ${i + 1}`, collateral.write.mint([filler.address, need]));
+
+    const token = new ethers.Contract(
+      isBuy ? quote.address : base.address,
+      ERC,
+      filler,
+    );
+    const vault = new ethers.Contract(hashswap.address, HS, filler);
+
+    await (await token.approve(hashswap.address, need)).wait();
+    await (await vault.deposit(isBuy ? quote.address : base.address, need)).wait();
+
+    // The handle proof is bound to (owner, app), so each filler needs its own
+    // client — proofs minted by the operator would be rejected for the filler.
+    const hc = await createEthersHandleClient(filler as any);
     const amt = await hc.encryptInput(amount, "uint256", hashswap.address);
     const side = await hc.encryptInput(isBuy, "bool", hashswap.address);
 
-    await send(
-      `filler ${isBuy ? "buy " : "sell"} ${amount / ONE}`,
-      hashswap.write.submitIntent([amt.handle, amt.handleProof, side.handle, side.handleProof]),
-    );
+    const r = await (
+      await vault.submitIntent(amt.handle, amt.handleProof, side.handle, side.handleProof)
+    ).wait();
+    log(`filler ${i + 1} ${isBuy ? "buy " : "sell"} ${amount / ONE}`, `gas ${r.gasUsed}`);
   }
 
   const after = await hashswap.read.getBatch([batchId]);

@@ -10,6 +10,19 @@ import { createEthersHandleClient, NotYetComputedHandleError } from "@iexec-nox/
 /// Deposit -> three sealed orders -> close -> resolve the residual -> settle
 /// against the live Uniswap pool. This is the whole product against real tokens
 /// in a pool we neither created nor control.
+///
+/// ## Three wallets, not one
+///
+/// The contract allows one live intent per address per batch (audit F19), so
+/// this cannot run from a single key — and it should never have. A three-order
+/// batch submitted by one address has an anonymity set of *one*: the residual
+/// plus the knowledge that all three orders were yours reveals everything.
+/// `MIN_BATCH_SIZE` counts distinct parties precisely so that this is not
+/// mistakable for privacy.
+///
+/// Participants 2 and 3 are derived deterministically from the deployer key, and
+/// topped up from it on demand, so the script stays a one-command demo without
+/// pretending a single wallet is a crowd.
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (m: string, d = "") =>
@@ -38,12 +51,12 @@ async function main() {
   const ERC = [
     "function approve(address,uint256) returns (bool)",
     "function balanceOf(address) view returns (uint256)",
+    "function transfer(address,uint256) returns (bool)",
   ];
 
   const hs = new ethers.Contract(market.hashswap, HS, me);
   const base = new ethers.Contract(market.base.address, ERC, me);
   const quote = new ethers.Contract(market.quote.address, ERC, me);
-  const hc = await createEthersHandleClient(me as any);
 
   const bDec = market.base.decimals;
   const qDec = market.quote.decimals;
@@ -54,36 +67,94 @@ async function main() {
   console.log(`pool     ${market.pool}  (pre-existing, not ours)\n`);
 
   // Orders sized so two thirds cross internally and only the remainder trades.
-  const SELL_1 = unit("0.006", bDec);
-  const SELL_2 = unit("0.004", bDec);
-  const BUY = unit("0.008", bDec);
+  //
+  // SIZE scales all three together. The default is the headline demo size; drop
+  // it when the deployer's inventory is thin, since most of it ends up sitting
+  // in vault balances of previous deployments rather than in the wallet.
+  const SIZE = process.env.SIZE ?? "0.006";
+  const scale = (mult: number) => {
+    const b = ethers.parseUnits(SIZE, bDec);
+    return (b * BigInt(Math.round(mult * 1000))) / 1000n;
+  };
+  const SELL_1 = scale(1);
+  const SELL_2 = scale(2 / 3);
+  const BUY = scale(4 / 3);
 
   // Collateral: sellers post base, buyers post quote at the reference rate plus
-  // the contract's 5% buffer.
-  const baseNeeded = SELL_1 + SELL_2;
-  const quoteNeeded = (BUY * BigInt(market.refPrice) * 110n) / (10n ** 18n * 100n);
+  // headroom over the contract's 5% buffer.
+  const quoteForBuy = (BUY * BigInt(market.refPrice) * 110n) / (10n ** 18n * 100n);
 
-  log("depositing base", ethers.formatUnits(baseNeeded, bDec) + " " + market.base.symbol);
-  await (await base.approve(market.hashswap, baseNeeded)).wait();
-  await (await hs.deposit(market.base.address, baseNeeded)).wait();
+  // Three distinct participants. Two are derived from the deployer key so the
+  // demo stays one command, but they are separate addresses on-chain, which is
+  // what MIN_BATCH_SIZE is actually counting.
+  const derive = (i: number) =>
+    new ethers.Wallet(
+      ethers.keccak256(ethers.toUtf8Bytes(`hashswap/demo/${me.address}/${i}`)),
+      provider,
+    );
 
-  log("depositing quote", ethers.formatUnits(quoteNeeded, qDec) + " " + market.quote.symbol);
-  await (await quote.approve(market.hashswap, quoteNeeded)).wait();
-  await (await hs.deposit(market.quote.address, quoteNeeded)).wait();
+  const parties = [
+    { name: "seller-1", signer: me, amount: SELL_1, isBuy: false },
+    { name: "seller-2", signer: derive(2), amount: SELL_2, isBuy: false },
+    { name: "buyer", signer: derive(3), amount: BUY, isBuy: true },
+  ];
+
+  const GAS_FLOOR = ethers.parseEther("0.02");
+  const GAS_TOPUP = ethers.parseEther("0.04");
+
+  for (const p of parties) {
+    if (p.signer === me) continue;
+    const bal = await provider.getBalance(p.signer.address);
+    if (bal < GAS_FLOOR) {
+      log(`funding ${p.name}`, `${ethers.formatEther(GAS_TOPUP)} ETH -> ${p.signer.address}`);
+      await (await me.sendTransaction({ to: p.signer.address, value: GAS_TOPUP })).wait();
+    }
+    // Each participant needs their own collateral in their own wallet.
+    const token = p.isBuy ? quote : base;
+    const need = p.isBuy ? quoteForBuy : p.amount;
+    const held: bigint = await token.balanceOf(p.signer.address);
+    if (held < need) {
+      log(`funding ${p.name}`, `${ethers.formatUnits(need - held, p.isBuy ? qDec : bDec)} ${p.isBuy ? market.quote.symbol : market.base.symbol}`);
+      await (await token.transfer(p.signer.address, need - held)).wait();
+    }
+  }
+
+  // Each participant deposits their own collateral into their own vault balance.
+  for (const p of parties) {
+    const token = new ethers.Contract(
+      p.isBuy ? market.quote.address : market.base.address,
+      ERC,
+      p.signer,
+    );
+    const vault = new ethers.Contract(market.hashswap, HS, p.signer);
+    const need = p.isBuy ? quoteForBuy : p.amount;
+    const sym = p.isBuy ? market.quote.symbol : market.base.symbol;
+    log(`${p.name} depositing`, `${ethers.formatUnits(need, p.isBuy ? qDec : bDec)} ${sym}`);
+    await (await token.approve(market.hashswap, need)).wait();
+    await (await vault.deposit(p.isBuy ? market.quote.address : market.base.address, need)).wait();
+  }
 
   const batchId = await hs.currentBatchId();
   log("batch", batchId.toString());
 
-  for (const [amount, isBuy] of [
-    [SELL_1, false],
-    [SELL_2, false],
-    [BUY, true],
-  ] as const) {
-    const a = await hc.encryptInput(amount, "uint256", market.hashswap);
-    const s = await hc.encryptInput(isBuy, "bool", market.hashswap);
-    const r = await (await hs.submitIntent(a.handle, a.handleProof, s.handle, s.handleProof)).wait();
-    log(`${isBuy ? "buy " : "sell"} ${ethers.formatUnits(amount, bDec)}`, `gas ${r.gasUsed}`);
+  for (const p of parties) {
+    // The handle proof is bound to (owner, app), so each participant encrypts
+    // with their own client — one shared client would produce proofs the
+    // contract rejects for everyone but its owner.
+    const hcp = await createEthersHandleClient(p.signer as any);
+    const contract = new ethers.Contract(market.hashswap, HS, p.signer);
+    const a = await hcp.encryptInput(p.amount, "uint256", market.hashswap);
+    const s = await hcp.encryptInput(p.isBuy, "bool", market.hashswap);
+    const r = await (
+      await contract.submitIntent(a.handle, a.handleProof, s.handle, s.handleProof)
+    ).wait();
+    log(
+      `${p.name} ${p.isBuy ? "buy " : "sell"} ${ethers.formatUnits(p.amount, bDec)}`,
+      `gas ${r.gasUsed}`,
+    );
   }
+
+  const hc = await createEthersHandleClient(me as any);
 
   log("waiting window", "65s");
   await sleep(65_000);
