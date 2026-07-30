@@ -24,7 +24,8 @@ export function NettingDiagram() {
         </span>
       </div>
 
-      {/* Incoming orders — deliberately unlabelled. Nobody can read these. */}
+      {/* Incoming orders — deliberately unlabelled. Nobody can read these.
+          They draw in one after another so the batch reads as filling up. */}
       <div className="mt-7 space-y-2.5">
         {ORDERS.map((o, i) => (
           <div key={i} className="flex items-center gap-3">
@@ -33,12 +34,16 @@ export function NettingDiagram() {
               <path d="M8 10.5V7a4 4 0 018 0v3.5" stroke="currentColor" strokeWidth="2" />
             </svg>
             <div
-              style={{
-                width: `${o.w}%`,
-                height: 12,
-                background: "var(--ink-3)",
-                borderLeft: "2px solid var(--faint)",
-              }}
+              className="netbar"
+              style={
+                {
+                  width: `${o.w}%`,
+                  height: 12,
+                  background: "var(--ink-3)",
+                  borderLeft: "2px solid var(--faint)",
+                  "--i": i,
+                } as React.CSSProperties
+              }
             />
           </div>
         ))}
@@ -56,9 +61,10 @@ export function NettingDiagram() {
         <hr className="rule flex-1" />
       </div>
 
-      {/* What survives */}
+      {/* What survives — held back until the six above have finished, so the
+          sequence reads as cause and effect rather than one group appearing. */}
       <div className="flex items-center gap-3">
-        <div style={{ width: "11%", height: 22, background: "var(--red)" }} />
+        <div className="netbar netbar-out" style={{ width: "11%", height: 22, background: "var(--red)" }} />
         <div className="flex-1">
           <p className="text-[13px] font-bold">One trade reaches the market</p>
           <p className="text-[12px] mt-0.5" style={{ color: "var(--faint)" }}>

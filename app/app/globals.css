@@ -1087,3 +1087,173 @@ body {
 :root[data-theme="light"] .doodle {
   color: rgba(0, 0, 0, 0.14);
 }
+
+/* ========================================================= homepage
+
+   Type and motion for /home only, scoped under `.home`.
+
+   The marketing page is the one surface where movement earns its keep. The
+   trading page stays still on purpose — an interface that animates while you
+   are deciding how much money to commit reads as unserious, and every moving
+   thing there is a status change you actually need to notice.
+
+   Everything below collapses under prefers-reduced-motion at the end of the
+   file. Nothing here is load-bearing: strip the animation and the page is
+   still complete, just static. */
+
+/* Weight 500, not the 600 the app uses. At clamp() display sizes Space
+   Grotesk at 600 starts to shout; medium holds the same hierarchy and lets
+   the letterforms, rather than the weight, do the work. */
+.home .display,
+.home .display-md {
+  font-family: var(--font-display), var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+.home .eyebrow {
+  font-family: var(--font-display), var(--font-sans), ui-sans-serif, sans-serif;
+}
+
+/* ---- above the fold: animate on load, since it is already on screen */
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.rise {
+  animation: rise 0.66s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 90ms);
+}
+
+/* The headline's second line is uncovered by a moving edge rather than faded
+   in — it is the line that carries the promise, so it gets the one gesture on
+   the page that draws the eye left to right. Overshooting the right inset by a
+   hair stops italic-ish overhang clipping on the final glyph. */
+@keyframes wipe {
+  from { clip-path: inset(0 100% 0 0); }
+  to   { clip-path: inset(0 -0.15em 0 0); }
+}
+
+.wipe {
+  display: inline-block;
+  animation: wipe 0.9s cubic-bezier(0.66, 0, 0.2, 1) both;
+  animation-delay: 0.45s;
+}
+
+/* ---- below the fold: driven by IntersectionObserver in Reveal.tsx */
+
+.reveal {
+  opacity: 0;
+  transform: translateY(20px);
+  transition:
+    opacity 0.72s cubic-bezier(0.22, 0.68, 0.36, 1),
+    transform 0.72s cubic-bezier(0.22, 0.68, 0.36, 1);
+  transition-delay: var(--d, 0ms);
+}
+.reveal[data-shown="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+/* A rule that draws itself under a section label once the section arrives.
+   Tied to the reveal's state rather than its own keyframes, so it can never
+   run while the section is still off screen. */
+.eyebrow-rule {
+  display: block;
+  width: 44px;
+  height: 2px;
+  background: var(--red);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.8s cubic-bezier(0.22, 0.68, 0.36, 1) 0.18s;
+}
+.reveal[data-shown="true"] .eyebrow-rule {
+  transform: scaleX(1);
+}
+
+/* ---- panels that answer the pointer */
+
+.card {
+  position: relative;
+  background: var(--ink);
+  transition: background 0.35s ease;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: var(--red);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.45s cubic-bezier(0.22, 0.68, 0.36, 1);
+}
+.card:hover::before {
+  transform: scaleX(1);
+}
+.card:hover {
+  background: var(--ink-1);
+}
+
+/* ---- the netting bars draw themselves in
+
+   scaleX from a left origin rather than an animated width: the width is a
+   percentage of a flex parent, and animating it would relayout the row on
+   every frame. */
+@keyframes draw-bar {
+  from { transform: scaleX(0); opacity: 0; }
+  to   { transform: scaleX(1); opacity: 1; }
+}
+
+.netbar {
+  transform-origin: left;
+  animation: draw-bar 0.75s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+  animation-delay: calc(0.3s + var(--i, 0) * 85ms);
+}
+
+/* The residual waits for the six above it to finish, so the sequence reads as
+   cause and effect rather than as one group appearing. */
+.netbar-out {
+  animation-delay: 1.15s;
+}
+
+/* ---- the single call to action gets a slow heartbeat */
+@keyframes cta-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(225, 29, 46, 0); }
+  50%      { box-shadow: 0 0 34px 2px rgba(225, 29, 46, 0.4); }
+}
+.cta-pulse {
+  animation: cta-pulse 3.4s ease-in-out infinite;
+}
+
+/* ---- stat figures sit on tabular numerals so a counting animation cannot
+        change their width mid-count */
+.home dt {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .wipe,
+  .netbar,
+  .cta-pulse {
+    animation: none;
+  }
+  .reveal,
+  .eyebrow-rule,
+  .card,
+  .card::before {
+    transition: none;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+  .eyebrow-rule {
+    transform: scaleX(1);
+  }
+}
