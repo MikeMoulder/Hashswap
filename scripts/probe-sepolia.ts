@@ -157,7 +157,6 @@ async function main() {
       residualProof,
       isSell,
       side.decryptionProof as `0x${string}`,
-      0n,
     ]),
   );
 

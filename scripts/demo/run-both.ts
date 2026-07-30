@@ -180,7 +180,7 @@ async function laneB(viem: any, provider: any, wallets: any[]) {
   const poolBefore = await router.read.reserves([base.address]);
   await hashswap.write.settle([
     1n, residual, `0x${"00".repeat(65)}${residual.toString(16).padStart(64, "0")}`,
-    isSell, `0x${"00".repeat(65)}${isSell ? "01" : "00"}`, 0n,
+    isSell, `0x${"00".repeat(65)}${isSell ? "01" : "00"}`,
   ]);
   const poolAfter = await router.read.reserves([base.address]);
 

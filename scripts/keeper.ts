@@ -14,11 +14,16 @@ import { createEthersHandleClient, NotYetComputedHandleError } from "@iexec-nox/
 /// ## Trust
 ///
 /// NOT trusted for the value — `settle` verifies the gateway's signature
-/// on-chain via `Nox.publicDecrypt`, so a forged residual reverts. IS trusted
-/// for liveness and ordering: it chooses when to submit, so it could position
-/// its own transaction around the settlement swap. `minOut` bounds that, and
-/// removing the trust entirely needs commit-reveal or a permissionless keeper
-/// set.
+/// on-chain via `Nox.publicDecrypt`, so a forged residual reverts. NOT trusted
+/// for the execution price either: `settle` derives its own slippage bounds from
+/// the batch's reference price, so this process cannot widen them. It used to
+/// pass `minOut`/`maxIn` itself, which meant a keeper (or anyone else, since
+/// `settle` is permissionless) could hand the pool an unbounded order and settle
+/// into a price no buyer had funded.
+///
+/// It IS still trusted for liveness and ordering: it chooses *when* to submit.
+/// The price band bounds what that ordering is worth; removing the trust
+/// entirely needs commit-reveal or a permissionless keeper set.
 ///
 /// ## Why it sweeps every market
 ///
@@ -31,8 +36,8 @@ const TICK_MS = 8000;
 
 const HS_ABI = [
   "function currentBatchId() view returns (uint256)",
-  "function getBatch(uint256) view returns (tuple(uint64 openedAt,uint64 closedAt,uint32 count,uint8 status,bytes32 totalBuy,bytes32 totalSell,bytes32 residualHandle,bytes32 sellSideHandle,uint256 refPrice,uint256 residual,uint256 clearingPrice,bool residualIsSell))",
-  "function settle(uint256,uint256,bytes,bool,bytes,uint256)",
+  "function getBatch(uint256) view returns (tuple(uint64 openedAt,uint64 closedAt,uint32 count,uint8 status,bytes32 totalBuy,bytes32 totalSell,bytes32 residualHandle,bytes32 sellSideHandle,uint256 refPrice,uint256 residual,uint256 clearingPrice,bool residualIsSell, address maker, uint16 makerFeeBps))",
+  "function settle(uint256,uint256,bytes,bool,bytes)",
   "function closeBatch()",
   "function MIN_BATCH_SIZE() view returns (uint32)",
   "function BATCH_WINDOW() view returns (uint64)",
@@ -137,18 +142,18 @@ async function main() {
           const amount = BigInt(residual.value as any);
           const isSell = Boolean(side.value);
 
-          // TODO: derive from the pool's observe() TWAP. Unbounded means the
-          // keeper's own ordering is unconstrained — acceptable on a testnet,
-          // not acceptable against real value.
-          const limit = isSell ? 0n : ethers.MaxUint256;
-
           log(
             `${m.id} settling ${id}`,
             `${ethers.formatUnits(amount, m.base.decimals)} ${m.base.symbol} ${isSell ? "sell" : "buy"}`,
           );
 
+          // No slippage argument: the contract computes the bound itself from
+          // the batch's reference price. A settlement that cannot execute inside
+          // that band reverts here, and `cancelBatch` refunds the batch once the
+          // timeout elapses — refusing to trade is the correct outcome, so this
+          // failing is not a keeper fault.
           const receipt = await (
-            await m.contract.settle(id, amount, residual.proof, isSell, side.proof, limit)
+            await m.contract.settle(id, amount, residual.proof, isSell, side.proof)
           ).wait();
 
           const after = await m.contract.getBatch(id);

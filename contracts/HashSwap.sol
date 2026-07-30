@@ -45,11 +45,32 @@ contract HashSwap is HashSwapVault {
 
     uint256 public constant WAD = 1e18;
 
-    /// @dev Buyers lock 105% of the reference cost. If the clearing price drifts
-    ///      above the buffer their fill is clamped to what they locked, which
-    ///      under-fills them rather than making the contract insolvent. An
-    ///      encrypted limit price (build.md Stage 6) is the real fix.
+    /// @dev Buyers lock 105% of the reference cost at submit time. `settle`
+    ///      refuses any clearing price that would exceed what that buffer covers
+    ///      (see `MAX_PRICE_DEVIATION_BPS`), so the lock is always sufficient.
     uint256 public constant BUFFER_BPS = 10_500;
+
+    /// @notice How far the realized clearing price may drift from the batch's
+    ///         reference price before settlement is refused, in basis points.
+    ///
+    /// @dev **This is the solvency bound, not a tuning knob.** Buyers post
+    ///      `BUFFER_BPS` of the reference cost and nothing more, while sellers are
+    ///      credited at the realized price. If the realized price were allowed
+    ///      past what buyers locked, the contract would credit more quote than it
+    ///      holds and the last withdrawer would find the vault empty. The bound
+    ///      that must hold is
+    ///
+    ///          (10_000 + MAX_PRICE_DEVIATION_BPS) * (10_000 + MAX_MAKER_FEE_BPS)
+    ///              <= BUFFER_BPS * 10_000
+    ///
+    ///      which at 400 / 50 / 10_500 is 104,520,000 <= 105,000,000. Raising
+    ///      this without raising `BUFFER_BPS` reintroduces the insolvency.
+    ///
+    ///      The lower half of the band protects sellers symmetrically, and
+    ///      incidentally makes a zero clearing price unreachable — a zero would
+    ///      otherwise propagate into the next batch's reference and let buys
+    ///      through with no collateral at all.
+    uint16 public constant MAX_PRICE_DEVIATION_BPS = 400; // ±4%
 
     /// @dev Below this, a batch reveals too much: at N=1 the residual *is* that
     ///      user's entire trade. The anonymity set is the batch size, so this is
@@ -71,7 +92,6 @@ contract HashSwap is HashSwapVault {
         bytes32 amount;      // euint256, base units, zero if unfunded
         bytes32 isBuy;       // ebool
         bytes32 quoteLocked; // euint256, buffered quote debited (zero for sells)
-        bool withdrawn;
     }
 
     /// @dev Encrypted constants shared across one batch's fills.
@@ -98,6 +118,11 @@ contract HashSwap is HashSwapVault {
         uint256 residual;      // plaintext, after settle
         uint256 clearingPrice; // WAD, after settle
         bool residualIsSell;
+        // Maker terms are snapshotted when the batch opens so that the owner
+        // cannot change what a participant is charged after they have already
+        // committed collateral to this batch.
+        address maker;
+        uint16 makerFeeBps;
     }
 
     address public immutable baseToken;
@@ -130,6 +155,17 @@ contract HashSwap is HashSwapVault {
     mapping(uint256 => Batch) private _batches;
     mapping(uint256 => Intent[]) private _intents;
 
+    /// @dev One live intent per address per batch.
+    ///
+    ///      Without this an attacker fills every slot themselves, which costs
+    ///      little because `_debit` answers an unfunded intent with zero rather
+    ///      than reverting. That locks real users out, and worse, it hands the
+    ///      attacker the whole batch: knowing their own orders they can read the
+    ///      published residual and recover the position of the one honest
+    ///      participant. `MIN_BATCH_SIZE` only bounds the anonymity set if the
+    ///      members are distinct parties.
+    mapping(uint256 => mapping(address => bool)) private _hasIntent;
+
     event BatchOpened(uint256 indexed batchId, uint256 refPrice);
     event IntentSubmitted(uint256 indexed batchId, address indexed user, uint256 index);
     event IntentWithdrawn(uint256 indexed batchId, address indexed user, uint256 index);
@@ -145,13 +181,16 @@ contract HashSwap is HashSwapVault {
     error BatchNotOpen();
     error BatchNotClosed();
     error NotIntentOwner();
-    error IntentAlreadyWithdrawn();
     error BatchFull();
     error WindowNotElapsed();
     error TimeoutNotElapsed();
     error ResidualMismatch();
     error NotOwner();
     error FeeTooHigh();
+    error AlreadySubmitted();
+    error NotCurrentBatch();
+    error PriceOutOfBand(uint256 clearingPrice, uint256 low, uint256 high);
+    error InvalidConfig();
 
     constructor(
         address baseToken_,
@@ -160,6 +199,16 @@ contract HashSwap is HashSwapVault {
         ISwapRouter02 swapRouter_,
         uint256 initialRefPrice
     ) {
+        // A zero reference price makes `quoteNeeded` zero for every buyer, so
+        // buys would join the batch fully collateralised by nothing. The price
+        // band keeps a live market away from zero; this keeps a fresh deployment
+        // from starting there.
+        if (
+            baseToken_ == address(0) || quoteToken_ == address(0)
+                || baseToken_ == quoteToken_ || address(swapRouter_) == address(0)
+                || initialRefPrice == 0
+        ) revert InvalidConfig();
+
         baseToken = baseToken_;
         quoteToken = quoteToken_;
         poolFee = poolFee_;
@@ -173,11 +222,28 @@ contract HashSwap is HashSwapVault {
     /// @notice Configure the maker of last resort.
     /// @param maker_ Address to pay, or zero to disable the mechanism.
     /// @param feeBps Spread around the clearing price, capped at MAX_MAKER_FEE_BPS.
+    ///
+    /// @dev Takes effect from the next batch, and additionally applies to the
+    ///      open one while it is still empty — otherwise a fresh deployment
+    ///      could never configure a maker for its first batch, since the
+    ///      constructor opens one.
+    ///
+    ///      Once anybody has submitted, that batch's terms are frozen. The owner
+    ///      must not be able to install a maker, or raise its spread, against
+    ///      collateral that was posted under different terms.
     function setMaker(address maker_, uint16 feeBps) external {
         if (msg.sender != owner) revert NotOwner();
         if (feeBps > MAX_MAKER_FEE_BPS) revert FeeTooHigh();
+
         maker = maker_;
         makerFeeBps = feeBps;
+
+        Batch storage b = _batches[currentBatchId];
+        if (b.status == Status.Open && b.count == 0) {
+            b.maker = maker_;
+            b.makerFeeBps = feeBps;
+        }
+
         emit MakerUpdated(maker_, feeBps);
     }
 
@@ -198,10 +264,12 @@ contract HashSwap is HashSwapVault {
         bytes calldata amountProof,
         externalEbool sideHandle,
         bytes calldata sideProof
-    ) external returns (uint256 index) {
+    ) external nonReentrant returns (uint256 index) {
         Batch storage b = _batches[currentBatchId];
         if (b.status != Status.Open) revert BatchNotOpen();
         if (b.count >= MAX_BATCH_SIZE) revert BatchFull();
+        if (_hasIntent[currentBatchId][msg.sender]) revert AlreadySubmitted();
+        _hasIntent[currentBatchId][msg.sender] = true;
 
         euint256 amount = Nox.fromExternal(amountHandle, amountProof);
         ebool isBuy = Nox.fromExternal(sideHandle, sideProof);
@@ -242,8 +310,7 @@ contract HashSwap is HashSwapVault {
                 user: msg.sender,
                 amount: euint256.unwrap(recorded),
                 isBuy: ebool.unwrap(isBuy),
-                quoteLocked: euint256.unwrap(quoteLocked),
-                withdrawn: false
+                quoteLocked: euint256.unwrap(quoteLocked)
             })
         );
         b.count++;
@@ -263,14 +330,32 @@ contract HashSwap is HashSwapVault {
     ///      Withdrawal is public: it reveals that this address left the batch, but
     ///      not the amount or the side. Both totals are decremented branchlessly,
     ///      so which one actually moved stays hidden.
-    function withdrawIntent(uint256 batchId, uint256 index) external {
+    ///
+    ///      The entry is removed by swapping the last one into its place rather
+    ///      than being tombstoned. A tombstone leaves the slot allocated, so
+    ///      repeated submit/withdraw churn would grow `_intents[batchId]` without
+    ///      limit — and both `_distribute` and `cancelBatch` walk that array, so
+    ///      a long enough one puts settlement *and* the refund path past the
+    ///      block gas limit, stranding the collateral the timeout exists to
+    ///      rescue. Swapping keeps `_intents[batchId].length == b.count`, which is
+    ///      bounded by `MAX_BATCH_SIZE`.
+    ///
+    ///      Indices therefore shift when someone leaves. A withdrawal racing
+    ///      another one can land on a stale index, but it cannot take anyone
+    ///      else's intent: the owner check rejects it.
+    function withdrawIntent(uint256 batchId, uint256 index) external nonReentrant {
         Batch storage b = _batches[batchId];
         if (b.status != Status.Open) revert BatchNotOpen();
 
-        Intent storage it = _intents[batchId][index];
+        Intent[] storage list = _intents[batchId];
+        Intent memory it = list[index];
         if (it.user != msg.sender) revert NotIntentOwner();
-        if (it.withdrawn) revert IntentAlreadyWithdrawn();
-        it.withdrawn = true;
+
+        uint256 last = list.length - 1;
+        if (index != last) list[index] = list[last];
+        list.pop();
+
+        _hasIntent[batchId][msg.sender] = false;
 
         euint256 amount = euint256.wrap(it.amount);
         ebool isBuy = ebool.wrap(it.isBuy);
@@ -296,7 +381,7 @@ contract HashSwap is HashSwapVault {
 
     /// @notice Net the batch and publish only the residual.
     /// @dev O(1) — the totals were accumulated incrementally at submit time.
-    function closeBatch() external {
+    function closeBatch() external nonReentrant {
         uint256 id = currentBatchId;
         Batch storage b = _batches[id];
         if (b.status != Status.Open) revert BatchNotOpen();
@@ -336,18 +421,32 @@ contract HashSwap is HashSwapVault {
     /// @param residualProof   Gateway-signed proof for it.
     /// @param isSell          Plaintext direction.
     /// @param sellSideProof   Gateway-signed proof for the direction.
-    /// @param limitAmount     `minOut` for a sell residual, `maxIn` for a buy.
     ///
     /// @dev Both proofs are verified against the handles stored at close, so a
     ///      keeper reporting a false residual reverts here (invariant I7).
+    ///
+    ///      **The slippage bound is derived here, not supplied.** It used to be a
+    ///      caller argument, which meant the caller could pass `minOut = 0` or
+    ///      `maxIn = type(uint256).max` and hand the pool an unbounded order —
+    ///      and `settle` is permissionless, so "the caller" is anyone. Combined
+    ///      with the buyer's fixed collateral that was a drain: move the pool,
+    ///      settle into it, and the contract credits sellers at a price no buyer
+    ///      funded. The limits now come from the batch's own reference price and
+    ///      nobody can widen them.
+    ///
+    ///      A batch that cannot execute inside the band does not settle at a bad
+    ///      price — it reverts, and `cancelBatch` refunds everyone once the
+    ///      timeout passes. Refusing to trade is always available; trading at an
+    ///      unfunded price is not.
     function settle(
         uint256 batchId,
         uint256 residual,
         bytes calldata residualProof,
         bool isSell,
-        bytes calldata sellSideProof,
-        uint256 limitAmount
-    ) external {
+        bytes calldata sellSideProof
+    ) external nonReentrant {
+        if (batchId != currentBatchId) revert NotCurrentBatch();
+
         Batch storage b = _batches[batchId];
         if (b.status != Status.Closed) revert BatchNotClosed();
 
@@ -356,29 +455,58 @@ contract HashSwap is HashSwapVault {
         bool verifiedIsSell = Nox.publicDecrypt(ebool.wrap(b.sellSideHandle), sellSideProof);
         if (verifiedResidual != residual || verifiedIsSell != isSell) revert ResidualMismatch();
 
+        uint256 refPrice = b.refPrice;
+        uint256 lowPrice = refPrice * (10_000 - MAX_PRICE_DEVIATION_BPS) / 10_000;
+        uint256 highPrice = refPrice * (10_000 + MAX_PRICE_DEVIATION_BPS) / 10_000;
+
+        // Mark settled before touching Uniswap. The swap is the only external
+        // call in this function and the tokens are constructor parameters, so a
+        // token with a transfer hook could otherwise re-enter a batch that still
+        // reads as Closed and distribute it twice.
+        b.status = Status.Settled;
+
         uint256 clearingPrice;
-        if (residual == 0) {
-            // Perfect coincidence of wants: nothing touches Uniswap at all. Price
-            // from the reference rather than an execution that never happened.
-            // Production must read a TWAP here, never `slot0` — spot is
-            // flash-manipulable within a block (build.md F8).
-            clearingPrice = b.refPrice;
+        if (residual * refPrice / WAD == 0) {
+            // Either a perfect coincidence of wants, or a residual worth less
+            // than one wei of quote. Neither can be priced by a swap — the first
+            // has nothing to swap and the second rounds to nothing — so both take
+            // the reference price and leave the pool untouched. The value the
+            // contract absorbs by not swapping is, by this test, under one wei.
+            clearingPrice = refPrice;
         } else if (isSell) {
             uint256 quoteOut = UniswapAdapter.swapExactIn(
-                swapRouter, baseToken, quoteToken, poolFee, residual, limitAmount, address(this)
+                swapRouter,
+                baseToken,
+                quoteToken,
+                poolFee,
+                residual,
+                residual * lowPrice / WAD, // minOut
+                address(this)
             );
             clearingPrice = quoteOut * WAD / residual;
         } else {
             uint256 quoteIn = UniswapAdapter.swapExactOut(
-                swapRouter, quoteToken, baseToken, poolFee, residual, limitAmount, address(this)
+                swapRouter,
+                quoteToken,
+                baseToken,
+                poolFee,
+                residual,
+                residual * highPrice / WAD, // maxIn
+                address(this)
             );
             clearingPrice = quoteIn * WAD / residual;
+        }
+
+        // The swap's own limit only bounds one side of the band; this closes the
+        // other. Sells cannot execute below `lowPrice` but could in principle
+        // print above `highPrice`, and buys the reverse.
+        if (clearingPrice < lowPrice || clearingPrice > highPrice) {
+            revert PriceOutOfBand(clearingPrice, lowPrice, highPrice);
         }
 
         b.residual = residual;
         b.residualIsSell = isSell;
         b.clearingPrice = clearingPrice;
-        b.status = Status.Settled;
 
         _distribute(batchId, clearingPrice);
         _openBatch(clearingPrice);
@@ -401,27 +529,31 @@ contract HashSwap is HashSwapVault {
     ///      strangers who may never arrive.
     function _distribute(uint256 batchId, uint256 clearingPrice) private {
         Intent[] storage list = _intents[batchId];
+        Batch storage b = _batches[batchId];
 
         // Shared encrypted constants live in a memory struct so the per-intent
         // work can sit in its own stack frame. Inlining it all blows the Yul
         // stack limit — every Nox op holds a live local, and there are a dozen
         // per fill.
+        //
+        // The maker terms come from the batch snapshot, not from live storage:
+        // participants are charged what was advertised when they committed.
         FillCtx memory c = FillCtx({
             zero: Nox.toEuint256(0),
             priceWad: Nox.toEuint256(clearingPrice),
             wad: Nox.toEuint256(WAD),
             bps: Nox.toEuint256(10_000),
-            feeRate: Nox.toEuint256(makerFeeBps),
-            mk: maker,
-            feeBps: makerFeeBps
+            feeRate: Nox.toEuint256(b.makerFeeBps),
+            mk: b.maker,
+            feeBps: b.makerFeeBps
         });
 
         euint256 accrued = c.zero;
         bool anyFee = false;
 
+        // Withdrawn intents are removed from the array outright, so every entry
+        // here is live.
         for (uint256 i = 0; i < list.length; i++) {
-            if (list[i].withdrawn) continue; // already refunded at withdrawal
-
             (euint256 fee, bool charged) = _fillOne(list[i], c);
             if (charged) {
                 accrued = Nox.add(accrued, fee);
@@ -458,8 +590,17 @@ contract HashSwap is HashSwapVault {
         }
 
         // Buyer receives base and is refunded the unspent portion of the lock.
-        // `safeSub` clamps so a clearing price beyond the buffer under-refunds
-        // rather than making the vault insolvent.
+        //
+        // `settle` rejects any clearing price the buffer does not cover, so
+        // `buyerOwes <= quoteLocked` holds and this subtraction succeeds. What
+        // remains is rounding: `quoteLocked` floors the buffered price once,
+        // while `buyerOwes` floors the fill and the fee separately, which can
+        // leave the two off by a wei at the boundary. The clamp absorbs that.
+        //
+        // It is NOT a solvency backstop, and must not be relied on as one — when
+        // it fires the buyer is still credited their full base, so a genuine
+        // overshoot would be paid out of quote the contract does not have. The
+        // band is what keeps the vault solvent; this is dust handling.
         (ebool refundOk, euint256 refundRaw) = Nox.safeSub(euint256.wrap(it.quoteLocked), buyerOwes);
         euint256 refund = Nox.select(refundOk, refundRaw, c.zero);
 
@@ -473,17 +614,20 @@ contract HashSwap is HashSwapVault {
     /// @dev Permissionless and time-gated. This is the answer to "what if the
     ///      keeper dies?" — the first production-readiness question anyone asks
     ///      (build.md F4, invariant I8).
-    function cancelBatch(uint256 batchId) external {
+    function cancelBatch(uint256 batchId) external nonReentrant {
+        if (batchId != currentBatchId) revert NotCurrentBatch();
+
         Batch storage b = _batches[batchId];
         if (b.status != Status.Closed) revert BatchNotClosed();
         if (block.timestamp < b.closedAt + SETTLE_TIMEOUT) revert TimeoutNotElapsed();
+
+        b.status = Status.Cancelled;
 
         Intent[] storage list = _intents[batchId];
         euint256 zero = Nox.toEuint256(0);
 
         for (uint256 i = 0; i < list.length; i++) {
             Intent storage it = list[i];
-            if (it.withdrawn) continue; // already refunded at withdrawal time
 
             euint256 amount = euint256.wrap(it.amount);
             ebool isBuy = ebool.wrap(it.isBuy);
@@ -494,8 +638,7 @@ contract HashSwap is HashSwapVault {
             _credit(quoteToken, it.user, euint256.wrap(it.quoteLocked));
         }
 
-        b.status = Status.Cancelled;
-        if (batchId == currentBatchId) _openBatch(b.refPrice);
+        _openBatch(b.refPrice);
 
         emit BatchCancelled(batchId);
     }
@@ -508,6 +651,13 @@ contract HashSwap is HashSwapVault {
         b.openedAt = uint64(block.timestamp);
         b.status = Status.Open;
         b.refPrice = refPrice;
+
+        // Freeze the maker terms for the life of this batch. Reading them live
+        // at settlement would let the owner install a maker, or raise its fee,
+        // after participants had already posted collateral against the terms
+        // they saw.
+        b.maker = maker;
+        b.makerFeeBps = makerFeeBps;
 
         euint256 zero = Nox.toEuint256(0);
         b.totalBuy = euint256.unwrap(zero);

@@ -57,6 +57,21 @@ abstract contract HashSwapVault {
     mapping(uint256 => PendingWithdrawal) private _withdrawals;
     uint256 private _nextWithdrawalId = 1;
 
+    /// @dev Reentrancy flag, shared with `HashSwap`. Every entry point that both
+    ///      moves ERC-20s and mutates encrypted state takes it. The tokens are
+    ///      constructor parameters, so a hook-bearing token (ERC-777, ERC-1363)
+    ///      is a deployment choice rather than something this contract controls.
+    uint256 private _entered;
+
+    error Reentrancy();
+
+    modifier nonReentrant() {
+        if (_entered == 1) revert Reentrancy();
+        _entered = 1;
+        _;
+        _entered = 0;
+    }
+
     event Deposited(address indexed user, address indexed token, uint256 amount);
     event WithdrawalRequested(
         uint256 indexed id, address indexed user, address indexed token, uint256 amount, bytes32 okHandle
@@ -70,13 +85,25 @@ abstract contract HashSwapVault {
     // ------------------------------------------------------------- deposits
 
     /// @notice Deposit tokens into a confidential balance.
+    ///
     /// @dev The amount is public here by design — see the note above. Encrypting
     ///      it would be theatre: the ERC-20 transfer reveals it regardless.
-    function deposit(address token, uint256 amount) external {
+    ///
+    ///      The credit is the *measured* balance delta, not the requested
+    ///      amount. A fee-on-transfer or rebasing token delivers less than it is
+    ///      asked for, and crediting the request would mint vault balance out of
+    ///      nothing — the encrypted books would exceed the real ones and the last
+    ///      withdrawer would eat the difference.
+    function deposit(address token, uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
+
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        _credit(token, msg.sender, Nox.toEuint256(amount));
-        emit Deposited(msg.sender, token, amount);
+        uint256 received = IERC20(token).balanceOf(address(this)) - balanceBefore;
+        if (received == 0) revert ZeroAmount();
+
+        _credit(token, msg.sender, Nox.toEuint256(received));
+        emit Deposited(msg.sender, token, received);
     }
 
     // ------------------------------------------------------------ withdrawals
@@ -91,7 +118,11 @@ abstract contract HashSwapVault {
     ///
     ///      This is the same shape as batch settlement (build.md §2.2): compute
     ///      privately, publish one value, verify its proof on-chain before acting.
-    function requestWithdraw(address token, uint256 amount) external returns (uint256 id) {
+    function requestWithdraw(address token, uint256 amount)
+        external
+        nonReentrant
+        returns (uint256 id)
+    {
         if (amount == 0) revert ZeroAmount();
 
         euint256 balance = _balances[token][msg.sender];
@@ -123,7 +154,7 @@ abstract contract HashSwapVault {
     /// @dev Permissionless: the proof is what authorises, not the caller. A forged
     ///      proof reverts inside `Nox.publicDecrypt`. Funds always go to the
     ///      original requester, never to `msg.sender`.
-    function finalizeWithdraw(uint256 id, bytes calldata proof) external {
+    function finalizeWithdraw(uint256 id, bytes calldata proof) external nonReentrant {
         PendingWithdrawal storage w = _withdrawals[id];
         if (w.user == address(0)) revert UnknownWithdrawal();
         if (w.finalized) revert AlreadyFinalized();

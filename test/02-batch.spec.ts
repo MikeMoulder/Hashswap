@@ -154,9 +154,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
       residual,
       uint256Proof(residual),
       true,
-      boolProof(true),
-      0n,
-    ]);
+      boolProof(true)]);
 
     const after = await hashswap.read.getBatch([1n]);
     assert.equal(after.status, 2, "Settled");
@@ -189,7 +187,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
 
     const b = await hashswap.read.getBatch([1n]);
     const residual = await nox.read.peek([b.residualHandle]);
-    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true), 0n]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true)]);
 
     const price = (await hashswap.read.getBatch([1n])).clearingPrice;
 
@@ -217,7 +215,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     assert.equal(await nox.read.peek([b.residualHandle]), 0n, "perfectly balanced");
 
     const poolBefore = await router.read.reserves([base.address]);
-    await hashswap.write.settle([1n, 0n, uint256Proof(0n), false, boolProof(false), 0n]);
+    await hashswap.write.settle([1n, 0n, uint256Proof(0n), false, boolProof(false)]);
 
     assert.equal(
       await router.read.reserves([base.address]),
@@ -244,9 +242,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
       residual,
       uint256Proof(residual),
       false,
-      boolProof(false),
-      1_000_000n * ONE,
-    ]);
+      boolProof(false)]);
     assert.equal((await hashswap.read.getBatch([1n])).status, 2);
   });
 
@@ -269,9 +265,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
         99n * ONE,
         uint256Proof(2n * ONE),
         true,
-        boolProof(true),
-        0n,
-      ]),
+        boolProof(true)]),
     );
   });
 
@@ -491,7 +485,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await hashswap.write.closeBatch();
     const b = await hashswap.read.getBatch([1n]);
     const residual = await nox.read.peek([b.residualHandle]);
-    await hashswap.write.settle([1n, residual, uint256Proof(residual), false, boolProof(false), 1_000_000n * ONE]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), false, boolProof(false)]);
 
     assert.equal(
       await balance(base, users[1]),
@@ -533,7 +527,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await hashswap.write.closeBatch();
     const b = await hashswap.read.getBatch([1n]);
     const residual = await nox.read.peek([b.residualHandle]);
-    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true), 0n]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true)]);
 
     const price = (await hashswap.read.getBatch([1n])).clearingPrice;
     assert.equal(
@@ -557,7 +551,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await hashswap.write.closeBatch();
     const b = await hashswap.read.getBatch([1n]);
     const residual = await nox.read.peek([b.residualHandle]);
-    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true), 0n]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true)]);
 
     const price = (await hashswap.read.getBatch([1n])).clearingPrice;
 
@@ -588,7 +582,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await hashswap.write.closeBatch();
     const b = await hashswap.read.getBatch([1n]);
     const residual = await nox.read.peek([b.residualHandle]);
-    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true), 0n]);
+    await hashswap.write.settle([1n, residual, uint256Proof(residual), true, boolProof(true)]);
 
     const price = (await hashswap.read.getBatch([1n])).clearingPrice;
     const ownFill = (6n * ONE * price) / WAD;

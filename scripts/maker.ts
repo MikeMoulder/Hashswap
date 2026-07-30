@@ -35,7 +35,7 @@ const STEP_IN_AT_SEC = 20;
 
 const HS_ABI = [
   "function currentBatchId() view returns (uint256)",
-  "function getBatch(uint256) view returns (tuple(uint64 openedAt,uint64 closedAt,uint32 count,uint8 status,bytes32 totalBuy,bytes32 totalSell,bytes32 residualHandle,bytes32 sellSideHandle,uint256 refPrice,uint256 residual,uint256 clearingPrice,bool residualIsSell))",
+  "function getBatch(uint256) view returns (tuple(uint64 openedAt,uint64 closedAt,uint32 count,uint8 status,bytes32 totalBuy,bytes32 totalSell,bytes32 residualHandle,bytes32 sellSideHandle,uint256 refPrice,uint256 residual,uint256 clearingPrice,bool residualIsSell, address maker, uint16 makerFeeBps))",
   "function submitIntent(bytes32,bytes,bytes32,bytes) returns (uint256)",
   "function deposit(address,uint256)",
   "function balanceHandleOf(address,address) view returns (bytes32)",

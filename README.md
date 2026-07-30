@@ -117,6 +117,24 @@ exchanged.
 **When `R = 0`** — a perfect coincidence of wants — no Uniswap trade happens at
 all and the batch leaves zero trace in the pool.
 
+**`P_clear` is bounded, and the bound is what keeps the vault solvent.** Buyers
+lock 105% of the reference cost (`BUFFER_BPS`) when they submit, because the
+clearing price does not exist yet. Sellers are credited at the realized price. If
+the realized price could exceed what buyers funded, the contract would credit
+more quote than it holds — so `settle` refuses any price more than
+`MAX_PRICE_DEVIATION_BPS` (±4%) from the batch's reference, and derives the swap's
+own `minOut` / `maxIn` from that band rather than accepting them as arguments.
+The width is not arbitrary:
+
+```
+(10_000 + 400) · (10_000 + 50)  ≤  10_500 · 10_000      // band · max maker fee ≤ buffer
+              104,520,000       ≤  105,000,000
+```
+
+A batch that cannot execute inside the band **does not settle at a bad price** —
+it reverts, and `cancelBatch` refunds everyone after the timeout. Refusing to
+trade is always available; trading at a price nobody funded is not.
+
 ### Matching is branchless Solidity
 
 Nox is **TEE-based, not FHE**. The Runner is a generic arithmetic service, not a
@@ -225,9 +243,10 @@ product and an illegitimate thing to leave unsaid.
 
 **Privacy is bounded by batch size.** The anonymity set *is* the batch. At N=1 the
 residual would equal that user's entire trade, which is why `MIN_BATCH_SIZE` is 3
-and under-filled batches roll over rather than settle. The check counts *orders*,
-not *addresses* — so self-filling satisfies it without providing real privacy.
-No contract check can manufacture other people's flow.
+and under-filled batches roll over rather than settle. The contract allows one
+live intent per address per batch, so a single wallet cannot be the whole crowd —
+but sybils can, as they can anywhere without identity. No contract check can
+manufacture other people's flow.
 
 **The cold-start problem is real.** At low volume users wait on strangers who may
 never arrive. The maker above is the mitigation; the proper fix is a shielded
@@ -242,11 +261,26 @@ beats a solo trade: in a one-sided batch (`crossed == 0`) a small trader pays th
 aggregate's average price, which is worse than trading alone. Crossed volume
 always wins; the residual is fair, not free.
 
-**Keeper honesty is enforced; keeper ordering is not.** The keeper cannot forge a
-residual — `Nox.publicDecrypt` verifies a gateway signature on-chain. But it
-learns `R` before submitting, so it could position around the settlement swap.
-The current keeper passes an unbounded slippage limit, which is fine on a testnet
-and **must** be replaced with a TWAP-derived bound before real value.
+**Keeper honesty is enforced; keeper ordering is bounded but not eliminated.** The
+keeper cannot forge a residual — `Nox.publicDecrypt` verifies a gateway signature
+on-chain — and it cannot choose the execution price either, since `settle` takes
+no slippage argument and computes its own bounds. What it still chooses is *when*
+to submit, and `settle` is permissionless, so anyone can.
+
+The band bounds what that ordering is worth, but it is measured against the
+**previous** batch's clearing price, which is a lagging reference. A patient
+attacker can still ratchet it ~4% per batch by paying for real swaps. That caps
+the damage per batch; it does not make the price manipulation-resistant. Reading
+the pool's `observe()` TWAP is the correct fix and is **not built** — do it before
+real value. Removing the ordering trust entirely needs commit-reveal or a
+permissionless keeper set.
+
+**Sub-dust residuals stall rather than settle.** A residual too small for the pool
+to price (a few wei of an 18-decimal base) cannot meet the derived `minOut`, so
+settlement refuses and the batch refunds after the timeout. Funds are safe; the
+batch is lost. A residual worth less than one wei of quote is absorbed instead.
+Closing the gap between those two needs a decimals-aware dust floor as a
+deployment parameter.
 
 **Gas.** `submitIntent` costs ~760k — roughly 17 Nox ops at ~45k each, since every
 operation is an external call into the NoxCompute singleton. `closeBatch` is O(1)
@@ -275,7 +309,7 @@ occasionally fail transiently and succeed on retry.
 ## Testing
 
 ```bash
-npx hardhat test          # 48 passing
+npx hardhat test          # 66 passing
 ```
 
 Tests run against `MockNoxCompute`, a plaintext implementation of the
@@ -300,6 +334,34 @@ balances); an unfunded order contributes zero without bricking the batch; an
 unsettled batch refunds everyone after a timeout; an order can be withdrawn from
 a batch that never fills; a withdrawn order is neither filled nor double-refunded;
 the maker does not pay the spread it earns.
+
+### Security regressions
+
+`test/03-hardening.spec.ts` holds 15 tests written as *attacks* rather than as
+feature checks, so a regression reads as "the attack worked again". They came out
+of a full audit pass over the contracts, keeper and frontend, in which two drains
+were found, reproduced with working exploits, and fixed:
+
+* **An unbounded clearing price made the vault insolvent.** Past the buyers'
+  buffer the contract credited buyers their full base and sellers their full
+  quote while holding neither — reproduced at a **414,245 token shortfall**, and
+  triggerable by anyone, since `settle` is permissionless and took its own
+  slippage bound as a caller argument. Fixed by the price band above.
+* **A dust residual drove the clearing price to zero**, which propagated into the
+  next batch's reference price and made buys need no collateral at all —
+  reproduced at **500 base tokens taken from an honest seller for nothing**.
+  Fixed by the band's lower half plus constructor validation.
+
+Also covered: one address cannot hold the whole batch; submit/withdraw churn
+cannot grow the intent array past the gas limit (which would have bricked both
+settlement *and* the refund path); maker terms cannot change after a participant
+has committed; deposits credit the amount received rather than the amount
+requested.
+
+The audit found nothing wrong with the confidential machinery — ACL discipline,
+the `safeSub` select-pattern, handle confidentiality, and keeper-cannot-lie all
+held up under direct attack. Every finding was in the seam where an encrypted
+value becomes a plaintext one and touches the pool.
 
 ## Running it
 
@@ -329,11 +391,12 @@ contracts/
   lib/BatchMath.sol       branchless netting primitives
   lib/UniswapAdapter.sol  ← the entire Uniswap integration
   interfaces/             minimal hand-written Uniswap interfaces
-  mocks/                  MockNoxCompute, MockSwapRouter, MockERC20
+  mocks/                  MockNoxCompute, MockSwapRouter, MockERC20, MockFeeToken
 scripts/
   deploy-markets.ts  acquire-tokens.ts  run-market.ts
   keeper.ts  maker.ts  privacy-audit.ts  fill-batch.ts
   demo/run-both.ts        the sandwich comparison
 app/                      Next.js interface — landing + swap
-test/                     48 tests
+test/                     66 tests
+  03-hardening.spec.ts    security regressions, written as attacks
 ```

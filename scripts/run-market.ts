@@ -31,9 +31,9 @@ async function main() {
     "function deposit(address,uint256)",
     "function submitIntent(bytes32,bytes,bytes32,bytes) returns (uint256)",
     "function closeBatch()",
-    "function settle(uint256,uint256,bytes,bool,bytes,uint256)",
+    "function settle(uint256,uint256,bytes,bool,bytes)",
     "function currentBatchId() view returns (uint256)",
-    "function getBatch(uint256) view returns (tuple(uint64,uint64,uint32,uint8,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,bool))",
+    "function getBatch(uint256) view returns (tuple(uint64,uint64,uint32,uint8,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,bool,address,uint16))",
   ];
   const ERC = [
     "function approve(address,uint256) returns (bool)",
@@ -116,7 +116,7 @@ async function main() {
   const before: bigint = await poolBase.balanceOf(market.pool);
 
   const r = await (
-    await hs.settle(batchId, residual, proof, isSell, side.decryptionProof, isSell ? 0n : ethers.MaxUint256)
+    await hs.settle(batchId, residual, proof, isSell, side.decryptionProof)
   ).wait();
   log("settled", `gas ${r.gasUsed}`);
 

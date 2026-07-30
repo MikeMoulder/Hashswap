@@ -33,7 +33,7 @@ async function main() {
       "function deposit(address,uint256)",
       "function submitIntent(bytes32,bytes,bytes32,bytes) returns (uint256)",
       "function currentBatchId() view returns (uint256)",
-      "function getBatch(uint256) view returns (tuple(uint64,uint64,uint32,uint8,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,bool))",
+      "function getBatch(uint256) view returns (tuple(uint64,uint64,uint32,uint8,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,bool,address,uint16))",
     ],
     signer,
   );
