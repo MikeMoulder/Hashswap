@@ -11,9 +11,9 @@ import { AccountMenu } from "./AccountMenu";
 /// Floating navigation.
 ///
 /// A detached pill rather than a full-width band, so the animated grid runs
-/// behind and past it instead of being sliced off by an opaque strip. The
-/// wordmark carries the identity on its own — a logo mark next to a five-letter
-/// name was redundant at this size.
+/// behind and past it instead of being sliced off by an opaque strip. The bolt
+/// is narrow enough to sit beside the wordmark without crowding the four links,
+/// the theme toggle and the connect button inside 940px.
 
 const LINKS = [
   { href: "/home", label: "Home" },
@@ -72,12 +72,15 @@ export function Nav({
         <span className="sheen-clip" aria-hidden>
           <span className="sheen" />
         </span>
-        <Link
-          href="/"
-          className="text-[15px] font-semibold tracking-tight shrink-0"
-          style={{ letterSpacing: "-0.02em" }}
-        >
-          HashSwap
+        {/* The mark is decorative: the wordmark beside it already names the link. */}
+        <Link href="/" className="flex items-center gap-2 shrink-0">
+          <img src="/logo.png" alt="" width={9} height={24} style={{ display: "block" }} />
+          <span
+            className="text-[15px] font-semibold tracking-tight"
+            style={{ letterSpacing: "-0.02em" }}
+          >
+            HashSwap
+          </span>
         </Link>
 
         <div className="hidden sm:flex items-center gap-1">

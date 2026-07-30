@@ -22,7 +22,7 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "HashSwap — private swaps on Uniswap",
+  title: "HashSwap",
   description:
     "Sealed orders, netted before they reach the pool. Nothing to front-run, nothing to copy.",
 };

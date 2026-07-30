@@ -1,11 +1,6 @@
 "use client";
 
-import { short } from "@/lib/hashswap";
-import { MARKETS, UNISWAP } from "@/lib/markets";
-
-const EXPLORER = "https://sepolia.etherscan.io/address";
-
-const COLUMNS: Array<{ head: string; items: Array<{ label: string; href?: string; value?: string }> }> = [
+const COLUMNS: Array<{ head: string; items: Array<{ label: string; href: string }> }> = [
   {
     head: "Protocol",
     items: [
@@ -26,84 +21,65 @@ const COLUMNS: Array<{ head: string; items: Array<{ label: string; href?: string
     ],
   },
   {
-    head: "Contracts",
+    head: "Resources",
     items: [
-      ...MARKETS.map((m) => ({
-        label: `${m.base.symbol}/${m.quote.symbol}`,
-        href: `${EXPLORER}/${m.hashswap}`,
-        value: short(m.hashswap, 6),
-      })),
-      { label: "Uniswap router", href: `${EXPLORER}/${UNISWAP.swapRouter02}`, value: short(UNISWAP.swapRouter02, 6) },
+      { label: "Documentation", href: "/docs" },
+      { label: "Source code", href: "https://github.com/MikeMoulder/Hashswap" },
+      { label: "Terms of use", href: "/terms" },
     ],
   },
 ];
 
+/// Two blocks, not four columns.
+///
+/// The previous grid spread brand + three link columns evenly across the full
+/// 1152px, which left every column orphaned in its own field of whitespace.
+/// Holding the links together as one cluster opposite the brand gives the row
+/// two things to read instead of four, and the gaps land between groups rather
+/// than inside them.
 export function Footer() {
   return (
-    <footer style={{ borderTop: "1px solid var(--line)" }} className="mt-28">
-      <div className="max-w-6xl mx-auto px-6 py-14">
-        <div className="grid gap-10 md:grid-cols-[1.6fr_repeat(3,1fr)]">
-          <div>
+    <footer style={{ borderTop: "1px solid var(--line)" }} className="mt-24">
+      <div className="max-w-6xl mx-auto px-6 py-12">
+        <div className="flex flex-col gap-12 md:flex-row md:items-start md:justify-between">
+          <div style={{ maxWidth: 272 }}>
+            {/* Same lockup as the nav, one size up. */}
             <div className="flex items-center gap-2.5">
-              <Mark />
+              <img src="/logo.png" alt="" width={13} height={34} style={{ display: "block" }} />
               <span className="text-[15px] font-semibold tracking-tight">HashSwap</span>
             </div>
-            <p className="text-[13px] mt-3 leading-relaxed" style={{ color: "var(--faint)", maxWidth: 260 }}>
+            <p className="text-[13px] mt-2.5 leading-relaxed" style={{ color: "var(--faint)" }}>
               Private execution on public markets. Orders are sealed until they
               clear, and most never reach the order book at all.
             </p>
-            <span className="tag mt-5">Sepolia testnet</span>
           </div>
 
-          {COLUMNS.map((col) => (
-            <div key={col.head}>
-              <p className="eyebrow mb-4">{col.head}</p>
-              <ul className="space-y-2.5">
-                {col.items.map((it) => (
-                  <li key={it.label}>
-                    <a
-                      href={it.href}
-                      target={it.href?.startsWith("http") ? "_blank" : undefined}
-                      rel="noreferrer"
-                      className="text-[13px] flex items-center justify-between gap-3 transition-colors"
-                      style={{ color: "var(--muted)" }}
-                      onMouseEnter={(e) => (e.currentTarget.style.color = "var(--paper)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.color = "var(--muted)")}
-                    >
-                      {it.label}
-                      {it.value && (
-                        <span className="mono text-[10px]" style={{ color: "var(--faint)" }}>
-                          {it.value}
-                        </span>
-                      )}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-
-        <hr className="rule mt-12 mb-6" />
-
-        <div className="flex flex-wrap items-center justify-between gap-4 text-[12px]" style={{ color: "var(--faint)" }}>
-          <span>Testnet software. Not audited. Do not use with real funds.</span>
-          <span>Uniswap is unmodified. HashSwap only calls it.</span>
+          <nav className="grid grid-cols-2 gap-x-12 gap-y-9 sm:grid-cols-3 sm:gap-x-16">
+            {COLUMNS.map((col) => (
+              <div key={col.head}>
+                <p className="eyebrow mb-3.5">{col.head}</p>
+                <ul className="space-y-2">
+                  {col.items.map((it) => (
+                    <li key={it.label}>
+                      <a
+                        href={it.href}
+                        target={it.href.startsWith("http") ? "_blank" : undefined}
+                        rel="noreferrer"
+                        className="text-[13px] transition-colors"
+                        style={{ color: "var(--muted)" }}
+                        onMouseEnter={(e) => (e.currentTarget.style.color = "var(--paper)")}
+                        onMouseLeave={(e) => (e.currentTarget.style.color = "var(--muted)")}
+                      >
+                        {it.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
         </div>
       </div>
     </footer>
-  );
-}
-
-export function Mark({ size = 26 }: { size?: number }) {
-  return (
-    <span
-      className="grid place-items-center shrink-0"
-      style={{ width: size, height: size, background: "var(--red)", borderRadius: 3 }}
-    >
-      <svg width={size * 0.6} height={size * 0.6} viewBox="0 0 16 16" fill="none">
-        <path d="M6 2L4.5 14M11.5 2L10 14M2.5 5.5h12M1.5 10.5h12" stroke="#fff" strokeWidth="1.6" strokeLinecap="square" />
-      </svg>
-    </span>
   );
 }
