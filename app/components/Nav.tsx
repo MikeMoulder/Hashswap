@@ -7,6 +7,7 @@ import { CONNECT_REQUEST, type Session } from "@/lib/hashswap";
 import { ThemeToggle } from "./ThemeToggle";
 import { WalletPicker } from "./WalletPicker";
 import { AccountMenu } from "./AccountMenu";
+import { MobileNav } from "./MobileNav";
 
 /// Floating navigation.
 ///
@@ -64,6 +65,7 @@ export function Nav({
   }, []);
 
   return (
+    <>
     <div
       className="sticky z-30 flex justify-center px-4"
       style={{ top: 0, paddingTop: scrolled ? 8 : 12, transition: "padding-top 0.3s ease" }}
@@ -74,7 +76,14 @@ export function Nav({
         </span>
         {/* The mark is decorative: the wordmark beside it already names the link. */}
         <Link href="/" className="flex items-center gap-2 shrink-0">
-          <img src="/logo.png" alt="" width={9} height={24} style={{ display: "block" }} />
+          <img
+            src="/logo.png"
+            alt=""
+            width={9}
+            height={24}
+            className="logo-float"
+            style={{ display: "block" }}
+          />
           <span
             className="text-[15px] font-semibold tracking-tight"
             style={{ letterSpacing: "-0.02em" }}
@@ -121,5 +130,11 @@ export function Nav({
         error={error}
       />
     </div>
+
+    {/* Outside the sticky wrapper on purpose. It is `position: fixed`, and a
+        transform on an ancestor would make it a containing block and pin the
+        bar to that element instead of the viewport. */}
+    <MobileNav />
+    </>
   );
 }

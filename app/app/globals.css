@@ -811,13 +811,148 @@ body {
   animation-delay: var(--delay, 0s);
 }
 
+/* The mark borrows the doodles' drift, but at 4.7px against their 9px — a bit
+   over half their travel. The doodles are absolutely positioned in open space,
+   where 9px is a drift; the logo is 24px tall and locked to a wordmark, where
+   the same distance reads as it coming loose.
+
+   It keeps its own keyframe rather than reusing float-y because the doodles
+   fold a per-instance rotation into theirs, and the logo has none to preserve. */
+@keyframes float-logo {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4.7px); }
+}
+.logo-float {
+  animation: float-logo 7s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sheen,
   .grid-bg,
   .doodle,
+  .logo-float,
   .dot,
   .scanning::after {
     animation: none;
+  }
+}
+
+/* -------------------------------------------------- mobile bottom nav
+
+   Phones only. The top pill drops its links below `sm` — four of them will
+   not sit beside a wallet button on a 375px screen — so they reappear down
+   here, in thumb reach.
+
+   Same glass as the nav pill, and the same reasoning behind it: the bar has
+   to float over the animated grid without cutting a hole in it. */
+.mobile-nav {
+  position: fixed;
+  left: 50%;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  transform: translateX(-50%);
+  /* Clips the items as they collapse to zero width. Without it they spill
+     past the rounded edge for the length of the transition. */
+  overflow: hidden;
+  background: rgba(20, 20, 26, 0.62);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 18px 44px -18px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  transition: gap 0.42s cubic-bezier(0.22, 0.68, 0.36, 1);
+}
+
+/* Collapsed: everything but the current page folds away and the bar closes
+   around what is left, so it shrinks *into* the active icon rather than
+   sliding off screen. The bar itself is never given a width — it is `auto`,
+   so it simply tracks the items as they animate, which is why the container
+   needs no width transition of its own.
+
+   It stays on screen at all times. A bottom bar that disappears entirely
+   leaves nothing to scroll back up to, which is the whole point of putting
+   navigation in thumb reach. */
+.mobile-nav[data-collapsed="true"] {
+  gap: 0;
+}
+
+/* Wide and shallow. Width comes from the item, not the container: four 72px
+   items make a ~300px bar, which is about 80% of a 375px screen, while 38px
+   of height keeps it shallow. Height is the one axis a bottom bar cannot
+   spend freely — it is taken straight off the content above it. */
+.mobile-nav-item {
+  display: grid;
+  place-items: center;
+  min-width: 72px;
+  max-width: 120px;
+  height: 38px;
+  border-radius: 999px;
+  color: var(--muted);
+  overflow: hidden;
+  transition:
+    color 0.2s ease,
+    background 0.25s ease,
+    transform 0.2s cubic-bezier(0.22, 0.68, 0.36, 1),
+    min-width 0.42s cubic-bezier(0.22, 0.68, 0.36, 1),
+    max-width 0.42s cubic-bezier(0.22, 0.68, 0.36, 1),
+    opacity 0.26s ease;
+}
+
+/* min-width has to go too: on its own, max-width cannot pull an item below
+   its min, and the row would refuse to close. */
+.mobile-nav[data-collapsed="true"] .mobile-nav-item[data-active="false"] {
+  min-width: 0;
+  max-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* There is no hover on a touch screen, so the press itself is the feedback. */
+.mobile-nav-item:active {
+  transform: scale(0.9);
+}
+
+.mobile-nav-item[data-active="true"] {
+  color: var(--red);
+  background: rgba(225, 29, 46, 0.12);
+}
+
+@media (min-width: 640px) {
+  .mobile-nav {
+    display: none;
+  }
+}
+
+/* Clear the bar so it never sits on top of the last of the footer.
+   14px offset + 44px of bar + room to breathe. */
+@media (max-width: 639px) {
+  body {
+    padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-nav,
+  .mobile-nav-item {
+    transition: none;
+  }
+  /* Left fully open rather than collapsing without warning: for anyone who has
+     asked for less motion, items appearing and disappearing under the thumb is
+     the jarring part, not the speed at which they do it. */
+  .mobile-nav[data-collapsed="true"] {
+    gap: 2px;
+  }
+  .mobile-nav[data-collapsed="true"] .mobile-nav-item[data-active="false"] {
+    min-width: 72px;
+    max-width: 120px;
+    opacity: 1;
+    pointer-events: auto;
   }
 }
 
@@ -1086,6 +1221,17 @@ body {
 
 :root[data-theme="light"] .doodle {
   color: rgba(0, 0, 0, 0.14);
+}
+
+/* Same correction the nav pill needs on light: drop the alpha so the grid and
+   bloom come through, then give the edge a highlight to catch. A dark panel
+   blurred over a near-white page just reads as grey. */
+:root[data-theme="light"] .mobile-nav {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(255, 255, 255, 0.8);
+  box-shadow:
+    0 18px 44px -20px rgba(10, 10, 10, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 /* ========================================================= homepage

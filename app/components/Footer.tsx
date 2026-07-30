@@ -45,7 +45,14 @@ export function Footer() {
           <div style={{ maxWidth: 272 }}>
             {/* Same lockup as the nav, one size up. */}
             <div className="flex items-center gap-2.5">
-              <img src="/logo.png" alt="" width={13} height={34} style={{ display: "block" }} />
+              <img
+                src="/logo.png"
+                alt=""
+                width={13}
+                height={34}
+                className="logo-float"
+                style={{ display: "block" }}
+              />
               <span className="text-[15px] font-semibold tracking-tight">HashSwap</span>
             </div>
             <p className="text-[13px] mt-2.5 leading-relaxed" style={{ color: "var(--faint)" }}>
