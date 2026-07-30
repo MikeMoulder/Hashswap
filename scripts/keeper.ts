@@ -32,7 +32,7 @@ import { createEthersHandleClient, NotYetComputedHandleError } from "@iexec-nox/
 
 const POLL_MS = Number(process.env.KEEPER_POLL_INTERVAL_MS ?? 2500);
 const MAX_WAIT_MS = Number(process.env.KEEPER_MAX_WAIT_MS ?? 120_000);
-const TICK_MS = 8000;
+const TICK_MS = 15_000;
 
 const HS_ABI = [
   "function currentBatchId() view returns (uint256)",
@@ -75,8 +75,22 @@ async function main() {
   const provider = new ethers.JsonRpcProvider((process.env.SEPOLIA_RPC_URL ?? "").trim());
   // The keeper holds no capital and cannot steal — the residual it submits is
   // signature-verified on-chain — so it runs on its own hot key, separate from
-  // the deployer's admin key. Falls back only if operators were never split.
-  const key = (process.env.KEEPER_PRIVATE_KEY ?? process.env.DEPLOYER_PRIVATE_KEY ?? "").trim();
+  // the deployer's admin key.
+  //
+  // No fallback to the deployer key, deliberately. This process is built to run
+  // unattended on a hot host, and the deployer key is the contract `owner` — it
+  // can install a maker, set fees, and holds the inventory. Falling back to it
+  // would mean a single missing environment variable silently puts the admin key
+  // on an internet-facing box, with everything still appearing to work. Refusing
+  // to start is the safe failure.
+  const key = (process.env.KEEPER_PRIVATE_KEY ?? "").trim();
+  if (!key) {
+    throw new Error(
+      "KEEPER_PRIVATE_KEY is not set. Set it explicitly — this process must never " +
+        "run as the deployer. Copy only KEEPER_PRIVATE_KEY and SEPOLIA_RPC_URL to " +
+        "the host, not the whole .env.",
+    );
+  }
   const signer = new ethers.Wallet("0x" + key.replace(/^0x/, ""), provider);
   const hc = await createEthersHandleClient(signer as any);
 
@@ -84,6 +98,14 @@ async function main() {
     ...m,
     contract: new ethers.Contract(m.hashswap, HS_ABI, signer),
   }));
+
+  // MIN_BATCH_SIZE and BATCH_WINDOW are Solidity `constant`s — compiled into the
+  // bytecode, unable to change. Reading them every tick, per market, was most of
+  // this process's RPC traffic and bought nothing.
+  for (const m of markets) {
+    m.minSize = Number(await m.contract.MIN_BATCH_SIZE());
+    m.windowSec = Number(await m.contract.BATCH_WINDOW());
+  }
 
   log("keeper online", `${markets.length} markets, ${signer.address.slice(0, 10)}…`);
   for (const m of markets) log(`  watching ${m.id}`, m.hashswap);
@@ -113,12 +135,9 @@ async function main() {
           // participants to hide them. Below MIN_BATCH_SIZE the contract rolls
           // over instead, so calling close is harmless but pointless.
           if (status === 0) {
-            const [minSize, windowSec] = await Promise.all([
-              m.contract.MIN_BATCH_SIZE(),
-              m.contract.BATCH_WINDOW(),
-            ]);
+            const { minSize, windowSec } = m; // read once at startup
             const elapsed = Math.floor(Date.now() / 1000) - Number(b.openedAt);
-            if (Number(b.count) >= Number(minSize) && elapsed >= Number(windowSec)) {
+            if (Number(b.count) >= minSize && elapsed >= windowSec) {
               log(`${m.id} closing batch ${id}`, `${b.count} orders`);
               await (await m.contract.closeBatch()).wait();
             }
