@@ -50,7 +50,7 @@ export function NettingDiagram() {
       </div>
 
       <p className="text-[12px] mt-4" style={{ color: "var(--faint)" }}>
-        Six orders. No sizes, no sides — not to us, not to anyone watching.
+        Six orders. No sizes, no sides. Not to us, not to anyone watching.
       </p>
 
       <div className="flex items-center gap-3 my-7">

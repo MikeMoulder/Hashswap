@@ -128,7 +128,7 @@ export function SandwichCompare() {
         </div>
 
         <p className="text-[13px] mt-8" style={{ color: "var(--faint)" }}>
-          Figures from <span className="mono">scripts/demo/run-both.ts</span> — a
+          Figures from <span className="mono">scripts/demo/run-both.ts</span>: a
           10 BASE sell into a 1,000 BASE pool, run both ways against identical
           state.
         </p>

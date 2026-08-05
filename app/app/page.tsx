@@ -120,7 +120,6 @@ export default function TradePage() {
                 batch={watched}
                 limits={limits}
                 secondsLeft={secondsLeft(watched)}
-                onActivity={() => setTick((t) => t + 1)}
               />
             )}
           </div>

@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { fmt, type Session } from "@/lib/hashswap";
 import type { BatchLimits, BatchView } from "@/lib/useBatch";
 
@@ -13,22 +12,25 @@ const STATUS = ["Collecting", "Clearing", "Settled", "Cancelled"];
 /// Batch data arrives as props now. It used to poll for itself, which meant two
 /// components asking the same node the same question on different timers and
 /// disagreeing in between.
+///
+/// Read-only, deliberately. This used to carry a "Close batch" button wired to
+/// `closeBatch()`, which was a manual override for a job the keeper already does
+/// on its own (`scripts/keeper.ts`) — and it was enabled on the wrong condition:
+/// it checked the window and `MAX_BATCH_SIZE` but never `MIN_BATCH_SIZE`, so
+/// below the floor the call succeeded, rolled the window (HashSwap.sol:394), and
+/// changed nothing an observer could see. A live button that costs gas to do
+/// nothing is worse than no button.
 export function BatchStrip({
   session,
   batch,
   limits,
   secondsLeft,
-  onActivity,
 }: {
   session: Session | null;
   batch: BatchView | null;
   limits: BatchLimits | null;
   secondsLeft: number;
-  onActivity: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   if (!session || !batch || !limits) {
     return (
       <div
@@ -41,7 +43,6 @@ export function BatchStrip({
   }
 
   const ready = batch.count >= limits.min;
-  const canClose = batch.status === 0 && (secondsLeft === 0 || batch.count >= limits.max);
 
   return (
     <div className="glass px-5 py-4 mt-3" style={{ maxWidth: 440, width: "100%" }}>
@@ -94,30 +95,14 @@ export function BatchStrip({
         </>
       )}
 
+      {/* Replaces the button rather than just dropping it. Without a control
+          here, the next question is who advances the batch and when — and the
+          honest answer is nobody the user has to be. */}
       {batch.status === 0 && (
-        <button
-          className="btn btn-line w-full mt-4"
-          disabled={!canClose || busy}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await (await session.hashswap.closeBatch()).wait();
-              onActivity();
-            } catch (e: any) {
-              setError(e?.shortMessage ?? e?.message ?? String(e));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? "Closing" : canClose ? "Close batch" : `Closes in ${secondsLeft}s`}
-        </button>
-      )}
-
-      {error && (
-        <p className="text-[11px] mono mt-3" style={{ color: "var(--red)" }}>
-          {error}
+        <p className="text-[11px] mt-3" style={{ color: "var(--faint)" }}>
+          {ready
+            ? "Closes and settles on its own, no action needed."
+            : "Waits for more orders. Nothing settles until there are enough to hide in."}
         </p>
       )}
     </div>

@@ -46,7 +46,7 @@ export function OrdersPanel({
   if (!session) {
     return (
       <Empty>
-        Connect a wallet to see orders. Nothing is stored in this browser — an
+        Connect a wallet to see orders. Nothing is stored in this browser. An
         order is read back from the chain, so it survives a refresh.
       </Empty>
     );
@@ -89,7 +89,7 @@ export function OrdersPanel({
       // the array and shifts whoever was last into their slot.
       const index = await findIntent(session, order.batchId);
       if (index === null) {
-        throw new Error("This order is no longer in the batch — it may have just settled.");
+        throw new Error("This order is no longer in the batch. It may have just settled.");
       }
 
       // Simulate first, so a refusal arrives as a sentence here rather than as
@@ -121,11 +121,18 @@ export function OrdersPanel({
 
       <div className="surface px-4 py-3.5">
         <Row label="Batch" value={String(batch.id).padStart(3, "0")} />
+        {/* Deliberately not the intent's array index. That is its slot in
+            `_intents` — set to the array length at submit time (HashSwap.sol:307)
+            and only ever changed by somebody else's withdrawal swap-popping into
+            it. Correctly static, but rendered as "1 of 3" it reads as a queue
+            position or a progress counter, and looks frozen. What the trader
+            actually wants from this number is how much cover they have. */}
         <Row
-          label="Position"
+          label="Orders in batch"
           value={
             <span style={{ color: "var(--muted)" }}>
-              {order.index + 1} of {batch.count}
+              {batch.count}
+              {limits && ` of ${limits.min} needed`}
             </span>
           }
         />
@@ -141,8 +148,11 @@ export function OrdersPanel({
                 ? `Needs ${limits.min - batch.count} more order${limits.min - batch.count === 1 ? "" : "s"}`
                 : secondsLeft > 0
                   ? `In ${secondsLeft}s`
-                  : "Ready to close"
-              : "Keeper is settling the residual"
+                  : // "Ready to close" promised an event the user could not see
+                    // arrive, and reads as an action they are expected to take.
+                    // This waits without naming the machinery doing the waiting.
+                    "Any moment now"
+              : "Settling on Uniswap now"
           }
         />
       </div>
@@ -158,9 +168,8 @@ export function OrdersPanel({
         <>
           {stalled && (
             <p className="text-[12px] mt-4 leading-relaxed" style={{ color: "var(--amber)" }}>
-              This batch has run out of window with too few orders to clear
-              safely, so it keeps rolling. Your collateral is posted and no fill
-              is coming until someone else joins. You can take it back.
+              Too few orders to stay private, so nothing can trade yet. Your
+              funds stay locked until more people join, or take them back now.
             </p>
           )}
 
@@ -171,18 +180,15 @@ export function OrdersPanel({
           {/* Stated because it is the one place using this app costs privacy,
               and the contract is explicit about it (HashSwap.sol:330-332). */}
           <p className="text-[11px] mt-2.5 leading-relaxed" style={{ color: "var(--faint)" }}>
-            Returns exactly what you posted. Leaving a batch is public — an
-            observer learns this address withdrew, though not the amount or which
-            way you were trading.
+            You get back exactly what you put in. Leaving is public: others can
+            see you withdrew, but not how much or which way.
           </p>
         </>
       )}
 
       {!open && (
         <p className="text-[12px] mt-4 leading-relaxed" style={{ color: "var(--faint)" }}>
-          The batch is closed and the residual is being decrypted and swapped.
-          Orders cannot be withdrawn once closing has begun — this is the point
-          where collateral is committed to a fill.
+          This batch is trading now. Orders can't be withdrawn once it starts.
         </p>
       )}
 
