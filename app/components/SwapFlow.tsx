@@ -38,6 +38,7 @@ export function buildFlow({
   sellSymbol,
   amount,
   alreadyFunded,
+  fundedNow,
   failedAt,
   submitted,
   batch,
@@ -49,6 +50,13 @@ export function buildFlow({
   sellSymbol: string;
   amount: string;
   alreadyFunded: boolean;
+  /// Whether this run is paying for its own collateral.
+  ///
+  /// `alreadyFunded` is read off the vault balance, so it becomes true the
+  /// instant the deposit confirms — and again once the amount field clears on
+  /// submission. Either would rewrite the two funding steps as "skipped" after
+  /// the user had just watched them run.
+  fundedNow: boolean;
   failedAt: string | null;
   /// Whether this wallet actually has an intent in `batch`.
   ///
@@ -62,6 +70,11 @@ export function buildFlow({
 }): FlowStep[] {
   const past = (...stages: LocalStage[]) => stages.includes(stage);
 
+  /// Whether funding is not part of this order at all — the vault already
+  /// covered it. Distinct from `alreadyFunded`, which also goes true the moment
+  /// a deposit made *for* this order lands.
+  const skipped = !fundedNow && (alreadyFunded || submitted);
+
   /// Funding is two transactions, kept separate because either can fail on its
   /// own and a demo that collapses them cannot show which did. When the vault
   /// balance already covers the order they are marked skipped rather than
@@ -69,7 +82,7 @@ export function buildFlow({
   const fundState = (self: LocalStage): StepState => {
     if (failedAt === self) return "failed";
     if (stage === self) return "active";
-    if (alreadyFunded) return "skipped";
+    if (skipped) return "skipped";
     if (self === "approving" && past("depositing", "sealing", "submitting", "queued")) return "done";
     if (self === "depositing" && past("sealing", "submitting", "queued")) return "done";
     return "todo";
@@ -129,7 +142,7 @@ export function buildFlow({
     {
       key: "approving",
       title: "Approve",
-      note: alreadyFunded
+      note: skipped
         ? "Vault already holds enough, nothing to approve"
         : `Let the vault move ${amount || "your"} ${sellSymbol}`,
       chain: "A standard ERC-20 approval",
@@ -139,14 +152,14 @@ export function buildFlow({
     {
       key: "depositing",
       title: "Deposit",
-      note: alreadyFunded
+      note: skipped
         ? `Skipped. This order is collateralised from ${sellSymbol} already sitting in your vault`
         : `Move ${amount || "the amount"} ${sellSymbol} into the confidential vault`,
       // Skipping these two steps is the privacy mechanism, not a shortcut. A
       // deposit that matches an intent in size and timing links the two, so the
       // system is working as intended precisely when the trade needs no transfer.
-      chain: alreadyFunded ? "Nothing. No transfer happens for this trade" : "The transfer, and its amount",
-      visibility: alreadyFunded ? "private" : "public",
+      chain: skipped ? "Nothing. No transfer happens for this trade" : "The transfer, and its amount",
+      visibility: skipped ? "private" : "public",
       state: fundState("depositing"),
     },
     {

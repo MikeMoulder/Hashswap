@@ -25,9 +25,13 @@ export function SwapCard({
   market,
   onSelectMarket,
   batch,
+  currentBatch,
+  liveOrder,
   limits,
   secondsLeft,
   onWatchBatch,
+  onViewOrder,
+  verifyCanPlace,
 }: {
   session: Session | null;
   onActivity: () => void;
@@ -38,9 +42,22 @@ export function SwapCard({
   onSelectMarket: (id: string) => void;
   /// The batch this order is in, once there is one, otherwise the open batch.
   batch: BatchView | null;
+  /// The batch a *new* order would join. Distinct from `batch`, which follows
+  /// the order already placed — after submission the two diverge, and it is this
+  /// one that decides whether another order can be placed at all.
+  currentBatch: BatchView | null;
+  /// This wallet's live order, if the chain has one. Not the same as `myBatch`
+  /// below: this survives a refresh, that does not.
+  liveOrder: boolean;
   limits: BatchLimits | null;
   secondsLeft: number;
   onWatchBatch: (id: bigint | null) => void;
+  onViewOrder: () => void;
+  /// Authoritative re-check, run before anything is signed. `liveOrder` is a
+  /// poll result and is therefore stale twice: for a second or so after the page
+  /// loads, and for up to one interval after another tab places an order. Both
+  /// windows end with the user paying for a deposit and then meeting a revert.
+  verifyCanPlace: () => Promise<string | null>;
 }) {
   const [sellBase, setSellBase] = useState(true);
   const [amount, setAmount] = useState("");
@@ -50,6 +67,12 @@ export function SwapCard({
   /// Set once an intent of ours is in `batch`. The page owns the id it polls;
   /// this is the card's own record that the order is actually ours.
   const [myBatch, setMyBatch] = useState<bigint | null>(null);
+  /// Whether this order paid for its own collateral.
+  ///
+  /// The moment the deposit lands the vault covers the order, so `alreadyFunded`
+  /// flips true and the two funding steps would redraw as "skipped" — the
+  /// timeline erasing work the user just watched happen. This remembers they ran.
+  const [fundedNow, setFundedNow] = useState(false);
 
   // Public, straight off the ERC-20. Always available, never needs a signature.
   const [baseWallet, setBaseWallet] = useState<bigint | null>(null);
@@ -228,8 +251,11 @@ export function SwapCard({
 
   /// Approve then deposit, as two visible steps. They are two transactions and
   /// either can be rejected on its own, so the flow names whichever one it is.
-  async function fund() {
-    if (!session || topUp === 0n) return;
+  ///
+  /// Returns whether funding succeeded, because the caller runs straight on into
+  /// sealing the order and needs to know not to.
+  async function fund(): Promise<boolean> {
+    if (!session || topUp === 0n) return false;
     setError(null);
     setFailedAt(null);
 
@@ -246,7 +272,8 @@ export function SwapCard({
         );
       }
     } catch (e: any) {
-      return fail("approving", e);
+      fail("approving", e);
+      return false;
     }
 
     try {
@@ -280,7 +307,8 @@ export function SwapCard({
         }
       }
     } catch (e: any) {
-      return fail("approving", e);
+      fail("approving", e);
+      return false;
     }
 
     try {
@@ -300,10 +328,13 @@ export function SwapCard({
       }
 
       await (await session.hashswap.deposit(addr, topUp)).wait();
-      setStage("idle");
+      // Deliberately not back to "idle" — the caller seals next, and dropping
+      // through idle would blank the timeline's active step between the two.
       onActivity();
+      return true;
     } catch (e: any) {
-      return fail("depositing", e);
+      fail("depositing", e);
+      return false;
     }
   }
 
@@ -349,28 +380,86 @@ export function SwapCard({
     }
   }
 
+  /// Why a new order cannot be placed right now, or null.
+  ///
+  /// Both cases are `submitIntent` reverting, caught before anyone signs
+  /// anything. Without this the user is walked through an approval and a deposit
+  /// — real money, real gas — and only meets the refusal at the final step, with
+  /// collateral already sitting in the vault.
+  ///
+  /// There is no third case. `_openBatch` runs only from `settle` and
+  /// `cancelBatch`, so `currentBatchId` advances only once every intent in the
+  /// outgoing batch has been filled or refunded: while you hold a live order,
+  /// one of these two always applies.
+  const blocked = !session
+    ? null
+    : liveOrder
+      ? // HashSwap.sol:271 — one intent per address per batch, so that the
+        // anonymity set counts distinct parties rather than repeated ones.
+        {
+          label: `Order in batch ${String(currentBatch?.id ?? 0n).padStart(3, "0")}`,
+          note: "You already have an order in this batch. It has to clear before you can place another.",
+        }
+      : currentBatch && currentBatch.status !== 0
+        ? // HashSwap.sol:269 — the batch is Closed and the next one does not open
+          // until the keeper settles this one.
+          {
+            label: "Batch is clearing",
+            note: "This batch has closed and is settling. The next one opens as soon as it does.",
+          }
+        : null;
+
+  /// Place the order, funding it first if the vault is short.
+  ///
+  /// One click, one intent. The button used to change its own job — press it
+  /// once to deposit, watch it land, then press the same button again to
+  /// actually trade — which reads as the app having stalled halfway, and left
+  /// collateral sitting in the vault whenever the second press never came.
+  /// Depositing is a precondition of the order, not a separate thing the user
+  /// asked for, so it happens inside the same action. The only thing that stops
+  /// the run is a failure, which the timeline already names.
+  async function placeOrder() {
+    if (!session || parsed === 0n || blocked) return;
+
+    setError(null);
+    setFailedAt(null);
+
+    const why = await verifyCanPlace().catch(() => null);
+    if (why) {
+      setError(why);
+      return;
+    }
+
+    setFundedNow(needsDeposit);
+    if (needsDeposit && !(await fund())) return;
+    await submit();
+  }
+
   // --------------------------------------------------------------- render
 
   const busy = stage === "approving" || stage === "depositing" || stage === "sealing" || stage === "submitting";
 
+  // Stage labels come before `blocked`, because the order placed by this very
+  // click shows up as a live order the moment it lands — and reporting the tail
+  // of a successful submission as a refusal is worse than saying nothing.
   const label = connecting
     ? "Connecting"
     : !session
       ? "Connect wallet"
-      : parsed === 0n
-        ? "Enter an amount"
-        : cannotAfford
-          ? `Not enough ${sellToken.symbol}`
-          : stage === "approving"
-            ? "Approving"
-            : stage === "depositing"
-              ? "Depositing"
-              : stage === "sealing"
-                ? "Sealing order"
-                : stage === "submitting"
-                  ? "Submitting"
-                  : needsDeposit
-                    ? `Deposit ${formatUnits(topUp, sellToken.decimals, 4)} ${sellToken.symbol}`
+      : stage === "approving"
+        ? "Approving"
+        : stage === "depositing"
+          ? "Depositing"
+          : stage === "sealing"
+            ? "Sealing order"
+            : stage === "submitting"
+              ? "Submitting"
+              : blocked
+                ? blocked.label
+                : parsed === 0n
+                  ? "Enter an amount"
+                  : cannotAfford
+                    ? `Not enough ${sellToken.symbol}`
                     : "Place private order";
 
   const submitted = myBatch !== null;
@@ -401,6 +490,7 @@ export function SwapCard({
     sellSymbol: sellToken.symbol,
     amount,
     alreadyFunded,
+    fundedNow,
     failedAt,
     submitted,
     batch,
@@ -516,23 +606,51 @@ export function SwapCard({
           <Row label="Front-running risk" value={<span style={{ color: "var(--red)" }}>None</span>} />
         </div>
 
-        {/* One button, one job at a time: connect, then fund if the vault is
-            short, then trade. Disabling it while disconnected would strand the
-            user with no obvious next step, which is why the card owns
-            connection too. */}
+        {/* One button, one intent. Connect, then place the order — funding it
+            on the way through if the vault is short. Disabling it while
+            disconnected would strand the user with no obvious next step, which
+            is why the card owns connection too. */}
         <button
           className="btn btn-red mt-5"
-          disabled={session ? parsed === 0n || cannotAfford || busy : connecting}
-          onClick={session ? (needsDeposit ? fund : submit) : onConnect}
+          disabled={session ? parsed === 0n || cannotAfford || busy || blocked !== null : connecting}
+          onClick={session ? placeOrder : onConnect}
         >
           {label}
         </button>
+
+        {/* Say why, and where the existing order went. A disabled button with a
+            terse label is the same dead end as the revert it is replacing.
+            Suppressed once this session has placed the order, because the
+            receipt below already says so in better words. */}
+        {blocked && !busy && !submitted && (
+          <p className="text-[12px] mt-3 text-center leading-relaxed" style={{ color: "var(--faint)" }}>
+            {blocked.note}
+            {liveOrder && (
+              <>
+                {" "}
+                <button className="link" onClick={onViewOrder}>
+                  View it
+                </button>
+              </>
+            )}
+          </p>
+        )}
 
         {/* Status-aware, because "It clears when the batch closes" was still on
             screen long after the batch had closed, cleared and settled. */}
         {submitted && receipt && (
           <p className="fade-up text-[13px] mt-4 text-center" style={{ color: receipt.tone }}>
             {receipt.text}
+            {/* The order outlives this card — on a refresh the tab is the only
+                place it still exists, so point at it while it is still here. */}
+            {liveOrder && (
+              <>
+                {" "}
+                <button className="link" onClick={onViewOrder}>
+                  View order
+                </button>
+              </>
+            )}
           </p>
         )}
 
