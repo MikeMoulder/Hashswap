@@ -302,6 +302,151 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await assert.rejects(hashswap.write.cancelBatch([1n]));
   });
 
+  // ------------------------------------------------------------------ liveness
+  //
+  // A closed batch used to be the market's single point of failure: the
+  // successor was opened at the end of `settle`, so between close and settlement
+  // `currentBatchId` pointed at a Closed batch and nobody could trade. A batch
+  // that could not settle — a reference price left behind by a drifting pool is
+  // enough — froze the market for the full SETTLE_TIMEOUT, and the only thing
+  // that could reopen it was the transaction that could not be sent. Observed on
+  // Sepolia: WETH-LINK batch 18, closed against a 2-day-old reference.
+
+  it("closing opens the successor at once, so orders never stop", async () => {
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    assert.equal(await hashswap.read.currentBatchId(), 2n, "successor opened by closeBatch");
+    assert.equal((await hashswap.read.getBatch([2n])).status, 0, "and it is Open");
+    assert.equal(await hashswap.read.pendingSettlement(), 1n, "batch 1 still owes a settlement");
+  });
+
+  it("a batch awaiting settlement does not block new orders", async () => {
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    // Batch 1 is closed and unsettled. This is the transaction that used to
+    // revert with BatchNotOpen for a whole hour.
+    await submit(4, 2n * ONE, false);
+
+    assert.equal((await hashswap.read.getBatch([2n])).count, 1, "order landed in the successor");
+  });
+
+  it("a batch that can never settle still does not halt the market", async () => {
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    // The keeper never comes. Trading continues throughout, and the stranded
+    // batch is refunded on the timeout without the successor being disturbed.
+    await submit(4, 3n * ONE, true);
+    await provider.request({ method: "evm_increaseTime", params: [3700] });
+    await provider.request({ method: "evm_mine", params: [] });
+
+    await hashswap.write.cancelBatch([1n]);
+
+    assert.equal(await hashswap.read.currentBatchId(), 2n, "cancel must not open a third batch");
+    assert.equal((await hashswap.read.getBatch([2n])).status, 0, "successor untouched and Open");
+    assert.equal((await hashswap.read.getBatch([2n])).count, 1, "and it kept its order");
+    assert.equal(await hashswap.read.pendingSettlement(), 0n, "queue cleared");
+  });
+
+  it("only one batch may await settlement at a time", async () => {
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    await submit(1, 1n * ONE, false);
+    await submit(2, 1n * ONE, true);
+    await submit(3, 1n * ONE, false);
+    await advancePastWindow();
+
+    // Without this bound, a batch stuck on a stale reference is followed by more
+    // batches inheriting the same reference, each closing into the same
+    // unsettleable state — a cascade of locked collateral rather than one hour.
+    await assert.rejects(hashswap.write.closeBatch(), /SettlementPending|reverted/);
+  });
+
+  // ------------------------------------------------------------- reference price
+
+  it("settling re-anchors the open batch to the price just discovered", async () => {
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    assert.equal(
+      (await hashswap.read.getBatch([2n])).refPrice,
+      REF_PRICE,
+      "successor opens on the old reference — the new one does not exist yet",
+    );
+
+    const b = await hashswap.read.getBatch([1n]);
+    const residual = await nox.read.peek([b.residualHandle]);
+    const isSell = (await nox.read.peek([b.sellSideHandle])) === 1n;
+    await hashswap.write.settle([
+      1n,
+      residual,
+      uint256Proof(residual),
+      isSell,
+      boolProof(isSell),
+    ]);
+
+    const cleared = (await hashswap.read.getBatch([1n])).clearingPrice;
+    assert.equal(
+      (await hashswap.read.getBatch([2n])).refPrice,
+      cleared,
+      "the open batch must track the last traded price, or it goes stale and stops settling",
+    );
+  });
+
+  it("re-anchoring stops once someone has committed to the open batch", async () => {
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await hashswap.write.closeBatch();
+
+    // A buyer commits to batch 2 before batch 1 settles. Their collateral was
+    // sized off REF_PRICE, and `settle` draws its band around the same number —
+    // moving it now would break that pairing.
+    await submit(4, 2n * ONE, true);
+    const quoteAfterLock = await balance(quote, users[3]);
+
+    const b = await hashswap.read.getBatch([1n]);
+    const residual = await nox.read.peek([b.residualHandle]);
+    const isSell = (await nox.read.peek([b.sellSideHandle])) === 1n;
+    await hashswap.write.settle([
+      1n,
+      residual,
+      uint256Proof(residual),
+      isSell,
+      boolProof(isSell),
+    ]);
+
+    assert.equal(
+      (await hashswap.read.getBatch([2n])).refPrice,
+      REF_PRICE,
+      "a batch that has taken an order keeps the reference it advertised",
+    );
+    assert.equal(
+      await balance(quote, users[3]),
+      quoteAfterLock,
+      "and the committed buyer's lock is untouched",
+    );
+  });
+
   // ------------------------------------------------------------- griefing (F7)
 
   it("an unfunded intent contributes zero without breaking the batch", async () => {

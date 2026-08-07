@@ -36,11 +36,14 @@ const TICK_MS = 15_000;
 
 const HS_ABI = [
   "function currentBatchId() view returns (uint256)",
+  "function pendingSettlement() view returns (uint256)",
   "function getBatch(uint256) view returns (tuple(uint64 openedAt,uint64 closedAt,uint32 count,uint8 status,bytes32 totalBuy,bytes32 totalSell,bytes32 residualHandle,bytes32 sellSideHandle,uint256 refPrice,uint256 residual,uint256 clearingPrice,bool residualIsSell, address maker, uint16 makerFeeBps))",
   "function settle(uint256,uint256,bytes,bool,bytes)",
+  "function cancelBatch(uint256)",
   "function closeBatch()",
   "function MIN_BATCH_SIZE() view returns (uint32)",
   "function BATCH_WINDOW() view returns (uint64)",
+  "function SETTLE_TIMEOUT() view returns (uint64)",
 ];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -105,6 +108,7 @@ async function main() {
   for (const m of markets) {
     m.minSize = Number(await m.contract.MIN_BATCH_SIZE());
     m.windowSec = Number(await m.contract.BATCH_WINDOW());
+    m.settleTimeout = Number(await m.contract.SETTLE_TIMEOUT());
   }
 
   log("keeper online", `${markets.length} markets, ${signer.address.slice(0, 10)}…`);
@@ -116,72 +120,87 @@ async function main() {
     for (const m of markets) {
       const key = (id: bigint) => `${m.id}#${id}`;
       try {
-        const current: bigint = await m.contract.currentBatchId();
-
-        // Closing opens a new batch, so the one needing settlement is usually
-        // already historical — sweep a few back.
-        for (let id = current; id > 0n && id > current - 4n; id--) {
-          if (done.has(key(id))) continue;
-
-          const b = await m.contract.getBatch(id);
-          const status = Number(b.status);
-
-          if (status === 2 || status === 3) {
-            done.add(key(id));
-            continue;
-          }
-
-          // Close a batch whose window has elapsed and which has enough
-          // participants to hide them. Below MIN_BATCH_SIZE the contract rolls
-          // over instead, so calling close is harmless but pointless.
-          if (status === 0) {
-            const { minSize, windowSec } = m; // read once at startup
-            const elapsed = Math.floor(Date.now() / 1000) - Number(b.openedAt);
-            if (Number(b.count) >= minSize && elapsed >= windowSec) {
-              log(`${m.id} closing batch ${id}`, `${b.count} orders`);
-              await (await m.contract.closeBatch()).wait();
-            }
-            continue;
-          }
-
-          // status === 1, Closed and awaiting settlement.
-          log(`${m.id} batch ${id} closed`, "resolving residual");
+        // Settlement first, always. `closeBatch` reverts while a batch is still
+        // owed a settlement, so a keeper that closed first would spend every
+        // tick bouncing off its own outstanding batch and never reach the
+        // settle that would release it.
+        const pending: bigint = await m.contract.pendingSettlement();
+        if (pending !== 0n) {
+          const b = await m.contract.getBatch(pending);
+          const age = Math.floor(Date.now() / 1000) - Number(b.closedAt);
 
           let residual, side;
           try {
             residual = await resolve(hc, b.residualHandle, "residual");
             side = await resolve(hc, b.sellSideHandle, "direction");
           } catch (e: any) {
-            // Do not spin. `cancelBatch` exists precisely so a stuck batch
-            // refunds rather than locking funds.
-            log(`${m.id} batch ${id} STUCK`, e.message);
-            continue;
+            log(`${m.id} batch ${pending} unresolved`, e.message);
           }
 
-          const amount = BigInt(residual.value as any);
-          const isSell = Boolean(side.value);
+          let settled = false;
+          if (residual && side) {
+            const amount = BigInt(residual.value as any);
+            const isSell = Boolean(side.value);
+            log(
+              `${m.id} settling ${pending}`,
+              `${ethers.formatUnits(amount, m.base.decimals)} ${m.base.symbol} ${isSell ? "sell" : "buy"}`,
+            );
+            try {
+              // No slippage argument: the contract computes the bound itself
+              // from the batch's reference price. A settlement that cannot
+              // execute inside that band reverts here, and the cancel below
+              // refunds it once the timeout elapses — refusing to trade is the
+              // correct outcome, so this failing is not a keeper fault.
+              const receipt = await (
+                await m.contract.settle(pending, amount, residual.proof, isSell, side.proof)
+              ).wait();
+              const after = await m.contract.getBatch(pending);
+              const price = ethers.formatUnits(
+                after.clearingPrice,
+                18 + m.base.decimals - m.quote.decimals,
+              );
+              log(
+                `${m.id} batch ${pending} settled`,
+                `gas ${receipt.gasUsed}, price ${price} ${m.quote.symbol}`,
+              );
+              settled = true;
+              done.add(key(pending));
+            } catch (e: any) {
+              log(
+                `${m.id} batch ${pending} unsettleable`,
+                (e?.shortMessage ?? e?.message ?? "").slice(0, 70),
+              );
+            }
+          }
 
-          log(
-            `${m.id} settling ${id}`,
-            `${ethers.formatUnits(amount, m.base.decimals)} ${m.base.symbol} ${isSell ? "sell" : "buy"}`,
-          );
+          // A batch that cannot settle has to be cleared, not merely reported.
+          // Until it is, participants stay collateralised and no further batch
+          // can close. This used to be left to a human; the contract has always
+          // allowed anyone to call it, so there is no reason it should be.
+          if (!settled) {
+            if (age >= m.settleTimeout) {
+              log(`${m.id} cancelling ${pending}`, `stuck ${age}s, refunding participants`);
+              await (await m.contract.cancelBatch(pending)).wait();
+              done.add(key(pending));
+            } else {
+              log(`${m.id} batch ${pending} waiting`, `cancellable in ${m.settleTimeout - age}s`);
+            }
+            continue; // nothing may close while this is outstanding
+          }
+        }
 
-          // No slippage argument: the contract computes the bound itself from
-          // the batch's reference price. A settlement that cannot execute inside
-          // that band reverts here, and `cancelBatch` refunds the batch once the
-          // timeout elapses — refusing to trade is the correct outcome, so this
-          // failing is not a keeper fault.
-          const receipt = await (
-            await m.contract.settle(id, amount, residual.proof, isSell, side.proof)
-          ).wait();
-
-          const after = await m.contract.getBatch(id);
-          const price = ethers.formatUnits(
-            after.clearingPrice,
-            18 + m.base.decimals - m.quote.decimals,
-          );
-          log(`${m.id} batch ${id} settled`, `gas ${receipt.gasUsed}, price ${price} ${m.quote.symbol}`);
-          done.add(key(id));
+        // Then close the open batch if it is ready. Below MIN_BATCH_SIZE the
+        // contract rolls the window over instead, so calling close is harmless
+        // but pointless.
+        const current: bigint = await m.contract.currentBatchId();
+        const b = await m.contract.getBatch(current);
+        if (Number(b.status) === 0) {
+          const { minSize, windowSec } = m; // read once at startup
+          const elapsed = Math.floor(Date.now() / 1000) - Number(b.openedAt);
+          if (Number(b.count) >= minSize && elapsed >= windowSec) {
+            log(`${m.id} closing batch ${current}`, `${b.count} orders`);
+            await (await m.contract.closeBatch()).wait();
+          }
         }
       } catch (e: any) {
         log(`${m.id} tick error`, (e?.shortMessage ?? e?.message ?? String(e)).slice(0, 80));

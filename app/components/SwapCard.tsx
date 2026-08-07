@@ -188,7 +188,12 @@ export function SwapCard({
   /// yet. Checking the face amount for a buy therefore under-counts by 5%, and
   /// `_debit` does not revert on a shortfall — it contributes zero and lets the
   /// intent join the batch anyway. The order would look placed and do nothing.
-  const required = sellBase ? parsed : (parsed * (limits?.bufferBps ?? BUFFER_BPS_FALLBACK)) / 10_000n;
+  const bufferBps = limits?.bufferBps ?? BUFFER_BPS_FALLBACK;
+  const required = sellBase ? parsed : (parsed * bufferBps) / 10_000n;
+
+  /// The buffer as a percentage, for prose. Derived rather than written as "5%"
+  /// so the copy cannot drift from the constant the contract actually charges.
+  const bufferPct = `${+(Number(bufferBps - 10_000n) / 100).toFixed(2)}%`;
 
   /// How much still has to be deposited before this order can be placed.
   ///
@@ -589,12 +594,27 @@ export function SwapCard({
               clicks and no transfer, and it is not obvious what paid for it. */}
           {parsed > 0n && (
             <Row
-              label={sellBase ? "Collateral" : "Quote locked"}
+              label={sellBase ? "Collateral" : "Collateral (refundable)"}
               value={
                 <span style={{ color: alreadyFunded ? "var(--muted)" : "var(--amber)" }}>
+                  {sellBase ? "" : "max "}
                   {formatUnits(required, sellToken.decimals, 4)} {sellToken.symbol}
                   {alreadyFunded ? " from your vault" : " to deposit"}
                 </span>
+              }
+              /* The 5% is the single most confusing number on this card: it reads
+                 as a price increase when it is collateral against a clearing
+                 price that does not exist yet. Say what is expected to be spent,
+                 and say the rest comes back — `_fill` credits the unspent lock to
+                 the vault at settlement. */
+              note={
+                sellBase ? undefined : (
+                  <>
+                    ≈{formatUnits(parsed, sellToken.decimals, 4)} {sellToken.symbol} at the reference
+                    price. The extra {bufferPct} covers the clearing price moving; whatever you do not
+                    spend is refunded to your vault when the batch clears.
+                  </>
+                )
               }
             />
           )}
@@ -670,11 +690,26 @@ export function SwapCard({
   );
 }
 
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
+function Row({
+  label,
+  value,
+  note,
+}: {
+  label: string;
+  value: React.ReactNode;
+  note?: React.ReactNode;
+}) {
   return (
-    <div className="flex items-center justify-between gap-4">
-      <span style={{ color: "var(--faint)" }}>{label}</span>
-      <span className="tnum">{value}</span>
+    <div>
+      <div className="flex items-center justify-between gap-4">
+        <span style={{ color: "var(--faint)" }}>{label}</span>
+        <span className="tnum">{value}</span>
+      </div>
+      {note && (
+        <p className="text-[11px] mt-1 leading-relaxed text-right" style={{ color: "var(--faint)" }}>
+          {note}
+        </p>
+      )}
     </div>
   );
 }
