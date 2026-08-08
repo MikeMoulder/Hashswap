@@ -44,6 +44,7 @@ export function buildFlow({
   batch,
   limits,
   secondsLeft,
+  settlementSecondsLeft,
 }: {
   stage: LocalStage;
   market: Market;
@@ -67,6 +68,7 @@ export function buildFlow({
   batch: BatchView | null;
   limits: BatchLimits | null;
   secondsLeft: number;
+  settlementSecondsLeft: number;
 }): FlowStep[] {
   const past = (...stages: LocalStage[]) => stages.includes(stage);
 
@@ -200,6 +202,8 @@ export function buildFlow({
       note:
         status === 2 && batch
           ? `${formatUnits(batch.residual, 18, 4)} reached Uniswap`
+          : status === 1
+            ? `Keeper retries inside the price guard. If it cannot clear, collateral refunds automatically in ${formatWait(settlementSecondsLeft)}`
           : `Only R = |B - S| is decrypted, then swapped once on ${market.base.symbol}/${market.quote.symbol}`,
       chain: "The residual, and one Uniswap swap. This is the only number that leaks",
       visibility: "public",
@@ -217,6 +221,12 @@ export function buildFlow({
       state: fill,
     },
   ];
+}
+
+function formatWait(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`;
 }
 
 export function SwapFlow({ steps }: { steps: FlowStep[] }) {

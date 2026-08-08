@@ -25,11 +25,13 @@ export function BatchStrip({
   batch,
   limits,
   secondsLeft,
+  settlementSecondsLeft,
 }: {
   session: Session | null;
   batch: BatchView | null;
   limits: BatchLimits | null;
   secondsLeft: number;
+  settlementSecondsLeft: number;
 }) {
   if (!session || !batch || !limits) {
     return (
@@ -50,10 +52,15 @@ export function BatchStrip({
         <span className="eyebrow">Batch {String(batch.id).padStart(3, "0")}</span>
         <span className="flex items-center gap-2 text-[11px]" style={{ color: "var(--muted)" }}>
           {batch.status === 0 && <span className="dot" />}
-          {STATUS[batch.status]}
+          {batch.status === 1 ? "Retrying settlement" : STATUS[batch.status]}
           {batch.status === 0 && secondsLeft > 0 && (
             <span className="tnum" style={{ color: "var(--faint)" }}>
               · {secondsLeft}s
+            </span>
+          )}
+          {batch.status === 1 && (
+            <span className="tnum" style={{ color: "var(--faint)" }}>
+              · refunds in {formatWait(settlementSecondsLeft)}
             </span>
           )}
         </span>
@@ -107,4 +114,10 @@ export function BatchStrip({
       )}
     </div>
   );
+}
+
+function formatWait(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`;
 }

@@ -105,7 +105,14 @@ contract HashSwap is HashSwapVault {
     /// @dev After this long unsettled, anyone may cancel and refund the batch.
     ///      Without it a dead keeper or an unresolvable handle locks funds
     ///      forever (build.md F4 / invariant I8).
-    uint64 public constant SETTLE_TIMEOUT = 1 hours;
+    ///
+    ///      Sized against how long a settlement legitimately takes, not against
+    ///      how long callers are willing to wait: the keeper decrypts two
+    ///      handles before it can call `settle`, each bounded by its own
+    ///      KEEPER_MAX_WAIT_MS (120s default, so ~4 min worst case), then still
+    ///      has to land the tx. Below that sum, a slow-but-healthy settlement
+    ///      races a cancel that refunds the batch instead.
+    uint64 public constant SETTLE_TIMEOUT = 5 minutes;
 
     enum Status { Open, Closed, Settled, Cancelled }
 
@@ -181,28 +188,17 @@ contract HashSwap is HashSwapVault {
 
     uint256 public currentBatchId;
 
-    /// @notice The closed batch awaiting `settle` or `cancelBatch`, or zero.
-    ///
-    /// @dev Closing used to be the end of order collection *and* the start of a
-    ///      freeze: the next batch was opened at the end of `settle`, so between
-    ///      close and settlement `currentBatchId` pointed at a Closed batch and
-    ///      every `submitIntent` reverted with `BatchNotOpen`. A batch that could
-    ///      not settle — a stale `refPrice` against a drifted pool is enough —
-    ///      took the whole market down with it for `SETTLE_TIMEOUT`, because the
-    ///      only thing that could reopen trading was the transaction that could
-    ///      not be sent.
-    ///
-    ///      `closeBatch` now opens the successor immediately, so collection never
-    ///      stops. This holds the batch still owed a settlement, which is what
-    ///      `settle` and `cancelBatch` address instead of `currentBatchId`.
-    ///
-    ///      Exactly one may be outstanding. Allowing a queue would let a batch
-    ///      stuck on a stale reference be followed by more batches inheriting
-    ///      that same reference, each one closing into the same unsettleable
-    ///      state — a cascade of locked collateral rather than one hour of it.
-    ///      Orders keep flowing into the open batch either way; only *closing*
-    ///      waits.
-    uint256 public pendingSettlement;
+    /// @notice Bound the unresolved work without making one failed residual a
+    ///         market-wide stop. Every closed batch keeps its own fixed reference
+    ///         price and can settle or refund independently.
+    uint32 public constant MAX_PENDING_BATCHES = 4;
+
+    /// @dev O(1) removal keeps settlement and cancellation independent of the
+    ///      number of queued batches. The public getter below is deliberately a
+    ///      snapshot rather than an iteration API: this list is tiny and callers
+    ///      need the complete set to drive the keeper.
+    uint256[] private _pendingBatches;
+    mapping(uint256 => uint256) private _pendingIndexPlusOne;
 
     mapping(uint256 => Batch) private _batches;
     mapping(uint256 => Intent[]) private _intents;
@@ -226,7 +222,6 @@ contract HashSwap is HashSwapVault {
         uint256 indexed batchId, uint256 residual, bool residualIsSell, uint256 clearingPrice
     );
     event BatchCancelled(uint256 indexed batchId);
-    event BatchRepriced(uint256 indexed batchId, uint256 refPrice);
 
     /// @notice The pool could not be read when this batch opened, so it fell
     ///         back to an inherited reference price.
@@ -250,8 +245,7 @@ contract HashSwap is HashSwapVault {
     error NotOwner();
     error FeeTooHigh();
     error AlreadySubmitted();
-    error NotCurrentBatch();
-    error SettlementPending(uint256 batchId);
+    error PendingBatchLimit(uint32 maximum);
     error PriceOutOfBand(uint256 clearingPrice, uint256 low, uint256 high);
     error InvalidConfig();
 
@@ -360,6 +354,7 @@ contract HashSwap is HashSwapVault {
         if (b.status != Status.Open) revert BatchNotOpen();
         if (b.count >= MAX_BATCH_SIZE) revert BatchFull();
         if (_hasIntent[currentBatchId][msg.sender]) revert AlreadySubmitted();
+
         _hasIntent[currentBatchId][msg.sender] = true;
 
         euint256 amount = Nox.fromExternal(amountHandle, amountProof);
@@ -472,16 +467,13 @@ contract HashSwap is HashSwapVault {
 
     /// @notice Net the batch, publish only the residual, and open its successor.
     /// @dev O(1) — the totals were accumulated incrementally at submit time.
-    ///
-    ///      Refuses to close while another batch is still owed a settlement. That
-    ///      is a liveness bound, not a safety one: see `pendingSettlement`. The
-    ///      open batch keeps accepting orders throughout, so a wait here delays
-    ///      one batch's execution rather than halting the market.
+    ///      Closed batches form a small independent queue. This lets later
+    ///      batches clear while an earlier residual waits for price recovery,
+    ///      without allowing an unbounded amount of locked collateral to pile up.
     function closeBatch() external nonReentrant {
         uint256 id = currentBatchId;
         Batch storage b = _batches[id];
         if (b.status != Status.Open) revert BatchNotOpen();
-        if (pendingSettlement != 0) revert SettlementPending(pendingSettlement);
         if (block.timestamp < b.openedAt + BATCH_WINDOW && b.count < MAX_BATCH_SIZE) {
             revert WindowNotElapsed();
         }
@@ -489,9 +481,23 @@ contract HashSwap is HashSwapVault {
         // Too few participants to hide anyone. Roll the window rather than
         // settle a batch that would expose its own members (build.md F2).
         if (b.count < MIN_BATCH_SIZE) {
+            // No collateral exists in an empty batch, so it is safe to
+            // re-anchor its price as well as its collection window. Without
+            // this, the deployment batch can sit empty for hours and the first
+            // later participants inherit an execution band from deployment.
+            // A non-empty batch deliberately keeps its reference unchanged:
+            // buyers have already locked quote against it.
+            if (b.count == 0) {
+                (bool ok, uint256 fromPool) = PoolOracle.refPrice(pool, baseToken);
+                if (ok && fromPool != 0) b.refPrice = fromPool;
+            }
             b.openedAt = uint64(block.timestamp);
             emit BatchRolledOver(id, b.count);
             return;
+        }
+
+        if (_pendingBatches.length >= MAX_PENDING_BATCHES) {
+            revert PendingBatchLimit(MAX_PENDING_BATCHES);
         }
 
         (, euint256 residual, ebool sellSide) =
@@ -506,14 +512,14 @@ contract HashSwap is HashSwapVault {
         b.sellSideHandle = ebool.unwrap(sellSide);
         b.closedAt = uint64(block.timestamp);
         b.status = Status.Closed;
-        pendingSettlement = id;
+        _pendingIndexPlusOne[id] = _pendingBatches.length + 1;
+        _pendingBatches.push(id);
 
         emit BatchClosed(id, b.residualHandle, b.sellSideHandle);
 
-        // Collection resumes in the same transaction that ended it. The clearing
-        // price this batch is about to discover does not exist yet, so the
-        // successor inherits this batch's reference and `settle` re-anchors it
-        // once there is a real one — see the repricing note there.
+        // Collection resumes in the same transaction that ended it. Each new
+        // batch reads the pool oracle independently when it is available, so a
+        // stalled predecessor normally cannot freeze its price into later work.
         _openBatch(b.refPrice);
     }
 
@@ -549,8 +555,6 @@ contract HashSwap is HashSwapVault {
         bool isSell,
         bytes calldata sellSideProof
     ) external nonReentrant {
-        if (batchId != pendingSettlement) revert NotCurrentBatch();
-
         Batch storage b = _batches[batchId];
         if (b.status != Status.Closed) revert BatchNotClosed();
 
@@ -620,37 +624,11 @@ contract HashSwap is HashSwapVault {
         b.residual = residual;
         b.residualIsSell = isSell;
         b.clearingPrice = clearingPrice;
-        pendingSettlement = 0;
+        _removePending(batchId);
 
         _distribute(batchId, clearingPrice);
-        _reprice(clearingPrice);
 
         emit BatchSettled(batchId, residual, isSell, clearingPrice);
-    }
-
-    /// @dev Point the open batch at the price that was just discovered.
-    ///
-    ///      `closeBatch` has to open the successor before this price exists, so
-    ///      it seeds it with the closing batch's reference. That reference is one
-    ///      batch stale by construction, and staleness is precisely what makes a
-    ///      batch unsettleable: the band in `settle` is drawn around `refPrice`,
-    ///      and a pool that has moved further than the band is wide can no longer
-    ///      be traded against. Left uncorrected, the reference would stop
-    ///      tracking the market entirely — every batch inheriting the last
-    ///      *opening* price rather than the last *traded* one.
-    ///
-    ///      Only while the batch is still empty. `submitIntent` sizes a buyer's
-    ///      collateral off `refPrice` at the moment they commit, and `settle`
-    ///      relies on that collateral covering anything inside the band drawn
-    ///      around the same number. Moving it under someone who has already
-    ///      posted would break that pairing and, on a downward move, leave the
-    ///      buyer holding a lock too small for the fill they are owed.
-    ///      A batch that has taken an order keeps the reference it advertised.
-    function _reprice(uint256 clearingPrice) private {
-        Batch storage open_ = _batches[currentBatchId];
-        if (open_.status != Status.Open || open_.count != 0) return;
-        open_.refPrice = clearingPrice;
-        emit BatchRepriced(currentBatchId, clearingPrice);
     }
 
     /// @dev Fill every participant at the single clearing price.
@@ -754,14 +732,12 @@ contract HashSwap is HashSwapVault {
     ///      keeper dies?" — the first production-readiness question anyone asks
     ///      (build.md F4, invariant I8).
     function cancelBatch(uint256 batchId) external nonReentrant {
-        if (batchId != pendingSettlement) revert NotCurrentBatch();
-
         Batch storage b = _batches[batchId];
         if (b.status != Status.Closed) revert BatchNotClosed();
         if (block.timestamp < b.closedAt + SETTLE_TIMEOUT) revert TimeoutNotElapsed();
 
         b.status = Status.Cancelled;
-        pendingSettlement = 0;
+        _removePending(batchId);
 
         Intent[] storage list = _intents[batchId];
         euint256 zero = Nox.toEuint256(0);
@@ -778,32 +754,49 @@ contract HashSwap is HashSwapVault {
             _credit(quoteToken, it.user, euint256.wrap(it.quoteLocked));
         }
 
-        // No successor to open — `closeBatch` already did that — and no price to
-        // re-anchor to, since nothing traded. The open batch keeps the reference
-        // it inherited, which is the same one that just failed to settle. A
-        // cancel caused by drift will therefore usually be followed by another,
-        // until a batch clears and `_reprice` catches the market up.
+        // No successor to open and no price to re-anchor: later batches have
+        // their own references from the pool oracle, so this failed batch cannot
+        // poison their settlement bands.
         emit BatchCancelled(batchId);
     }
 
     // ---------------------------------------------------------------- internals
 
+    /// @dev Delete a closed batch from the bounded pending set in O(1).
+    function _removePending(uint256 batchId) private {
+        uint256 indexPlusOne = _pendingIndexPlusOne[batchId];
+        // A Closed batch is inserted before it can be settled or cancelled. This
+        // guard is defensive: preserving the status check above is more useful
+        // to callers than panicking if a future migration ever omits an entry.
+        if (indexPlusOne == 0) return;
+
+        uint256 index = indexPlusOne - 1;
+        uint256 lastIndex = _pendingBatches.length - 1;
+        if (index != lastIndex) {
+            uint256 moved = _pendingBatches[lastIndex];
+            _pendingBatches[index] = moved;
+            _pendingIndexPlusOne[moved] = index + 1;
+        }
+        _pendingBatches.pop();
+        delete _pendingIndexPlusOne[batchId];
+    }
+
+    /// @notice Closed batches waiting for either settlement or timeout refund.
+    /// @dev Their order is deliberately unspecified: removal uses swap-and-pop.
+    function pendingBatchIds() external view returns (uint256[] memory) {
+        return _pendingBatches;
+    }
+
     /// @param inherited Reference price to use if the pool cannot be read: the
-    ///        clearing price after a settle, the outgoing batch's reference
-    ///        after a cancel, `initialRefPrice` at deployment.
+    ///        outgoing batch's reference, or `initialRefPrice` at deployment.
     ///
-    /// @dev The reference now comes from the pool, and `inherited` is only a
-    ///      fallback. Inheriting was the whole disease: a reference derived from
-    ///      this contract's own last successful trade froze the moment trading
-    ///      stopped, and a frozen reference is exactly what stops trading. A
-    ///      cancelled batch handed its stale price to its successor, so one
-    ///      unsettleable batch begat the next indefinitely.
+    /// @dev The reference comes from the pool, with `inherited` only as a
+    ///      fallback when the oracle is unavailable. A successor therefore does
+    ///      not depend on a predecessor ever settling.
     ///
     ///      Falling back rather than reverting is deliberate. This runs inside
-    ///      `settle` and `cancelBatch`, so a revert here would let anyone who
-    ///      can briefly disturb the pool wedge a batch that is trying to clear
-    ///      or, worse, one that is trying to refund. A stale price is a bad
-    ///      price; an unrefundable batch is a broken contract.
+    ///      `closeBatch`, so a briefly unreadable pool must not stop the market
+    ///      from advancing to its next collection window.
     function _openBatch(uint256 inherited) private {
         (bool ok, uint256 fromPool) = PoolOracle.refPrice(pool, baseToken);
         uint256 refPrice = (ok && fromPool != 0) ? fromPool : inherited;

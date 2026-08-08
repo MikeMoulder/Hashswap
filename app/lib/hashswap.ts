@@ -44,6 +44,8 @@ export const HASHSWAP_ABI = [
   "function closeBatch()",
   "function withdrawIntent(uint256 batchId, uint256 index)",
   "function currentBatchId() view returns (uint256)",
+  "function pendingBatchIds() view returns (uint256[])",
+  "function MAX_PENDING_BATCHES() view returns (uint32)",
   "function balanceHandleOf(address token, address user) view returns (bytes32)",
   "function intentCount(uint256 batchId) view returns (uint256)",
   "function getIntent(uint256 batchId, uint256 index) view returns (tuple(address user, bytes32 amount, bytes32 isBuy, bytes32 quoteLocked))",
@@ -51,6 +53,7 @@ export const HASHSWAP_ABI = [
   "function MIN_BATCH_SIZE() view returns (uint32)",
   "function MAX_BATCH_SIZE() view returns (uint32)",
   "function BATCH_WINDOW() view returns (uint64)",
+  "function SETTLE_TIMEOUT() view returns (uint64)",
   "function BUFFER_BPS() view returns (uint256)",
 ] as const;
 

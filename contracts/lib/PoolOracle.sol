@@ -11,10 +11,8 @@ import {IUniswapV3Pool} from "../interfaces/IUniswapV3Pool.sol";
 /// contract's own trading history rather than of the market: when settlement
 /// stopped, pricing froze, and frozen pricing is exactly what prevents
 /// settlement. A market could therefore drift out of its own price band and
-/// never get back — `cancelBatch` reopened the successor at the same stale
-/// reference, so every batch inherited the failure. On Sepolia one market
-/// reached 60% away from its pool and could no longer clear a buy of any size,
-/// down to dust.
+/// never get back. On Sepolia one market reached 60% away from its pool and
+/// could no longer clear a buy of any size, down to dust.
 ///
 /// Reading the pool at open makes staleness structurally impossible. The
 /// reference is at most one batch window old rather than unboundedly old, and a
@@ -55,9 +53,9 @@ library PoolOracle {
     ///
     /// @return ok    False when spot has moved too far from the mean, or the
     ///               pool has no usable history. The caller must then fall back
-    ///               rather than revert: this is on the path of `settle` and
-    ///               `cancelBatch`, and a manipulated pool must not be able to
-    ///               wedge a batch that is trying to clear or refund.
+    ///               rather than revert: the caller opens a new batch while a
+    ///               previous one may still be settling, and a manipulated pool
+    ///               must not be able to wedge that collection cycle.
     /// @return price Raw quote per raw base, times 1e18. Token decimals need no
     ///               special handling — they are already carried by the raw
     ///               ratio the pool stores.

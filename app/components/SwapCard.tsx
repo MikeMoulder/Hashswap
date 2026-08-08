@@ -29,6 +29,7 @@ export function SwapCard({
   liveOrder,
   limits,
   secondsLeft,
+  settlementSecondsLeft,
   onWatchBatch,
   onViewOrder,
   verifyCanPlace,
@@ -51,6 +52,7 @@ export function SwapCard({
   liveOrder: boolean;
   limits: BatchLimits | null;
   secondsLeft: number;
+  settlementSecondsLeft: number;
   onWatchBatch: (id: bigint | null) => void;
   onViewOrder: () => void;
   /// Authoritative re-check, run before anything is signed. `liveOrder` is a
@@ -484,7 +486,10 @@ export function SwapCard({
           tone: "var(--green)",
         }
       : batch?.status === 1
-        ? { text: "Batch closed. The residual is settling on Uniswap now.", tone: "var(--muted)" }
+        ? {
+            text: `Batch closed. The keeper is retrying the protected Uniswap settlement; it refunds automatically in ${formatWait(settlementSecondsLeft)} if it cannot clear.`,
+            tone: "var(--muted)",
+          }
         : batch?.status === 3
           ? { text: "That batch was cancelled and your collateral was returned.", tone: "var(--amber)" }
           : { text: "Order placed. It clears when the batch closes.", tone: "var(--green)" };
@@ -501,6 +506,7 @@ export function SwapCard({
     batch,
     limits,
     secondsLeft,
+    settlementSecondsLeft,
   });
 
   return (
@@ -688,6 +694,12 @@ export function SwapCard({
       </div>
     </div>
   );
+}
+
+function formatWait(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`;
 }
 
 function Row({

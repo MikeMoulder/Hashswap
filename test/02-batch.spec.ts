@@ -124,6 +124,22 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     assert.equal(await balance(base, users[0]), vaultBefore - 10n * ONE);
   });
 
+  it("refreshes an empty batch's reference when its window rolls", async () => {
+    // A deployment can remain empty for hours. Refresh while no one is
+    // collateralised, before the first participant can inherit the old band.
+    await advancePastWindow();
+    const moved = (REF_PRICE * 110n) / 100n;
+    await pool.write.setPrice([moved, base.address]);
+
+    await hashswap.write.closeBatch();
+
+    assertNear(
+      (await hashswap.read.getBatch([1n])).refPrice,
+      moved,
+      "the empty window re-anchors the batch before its first intent",
+    );
+  });
+
   it("a batch below MIN_BATCH_SIZE rolls over instead of settling", async () => {
     await submit(1, 5n * ONE, false);
     await advancePastWindow();
@@ -352,7 +368,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
 
     assert.equal(await hashswap.read.currentBatchId(), 2n, "successor opened by closeBatch");
     assert.equal((await hashswap.read.getBatch([2n])).status, 0, "and it is Open");
-    assert.equal(await hashswap.read.pendingSettlement(), 1n, "batch 1 still owes a settlement");
+    assert.deepEqual(await hashswap.read.pendingBatchIds(), [1n], "batch 1 still owes a settlement");
   });
 
   it("a batch awaiting settlement does not block new orders", async () => {
@@ -387,10 +403,10 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     assert.equal(await hashswap.read.currentBatchId(), 2n, "cancel must not open a third batch");
     assert.equal((await hashswap.read.getBatch([2n])).status, 0, "successor untouched and Open");
     assert.equal((await hashswap.read.getBatch([2n])).count, 1, "and it kept its order");
-    assert.equal(await hashswap.read.pendingSettlement(), 0n, "queue cleared");
+    assert.deepEqual(await hashswap.read.pendingBatchIds(), [], "queue cleared");
   });
 
-  it("only one batch may await settlement at a time", async () => {
+  it("later batches close and settle while an earlier batch is pending", async () => {
     await submit(1, 6n * ONE, false);
     await submit(2, 4n * ONE, false);
     await submit(3, 8n * ONE, true);
@@ -402,15 +418,43 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await submit(3, 1n * ONE, false);
     await advancePastWindow();
 
-    // Without this bound, a batch stuck on a stale reference is followed by more
-    // batches inheriting the same reference, each closing into the same
-    // unsettleable state — a cascade of locked collateral rather than one hour.
-    await assert.rejects(hashswap.write.closeBatch(), /SettlementPending|reverted/);
+    await hashswap.write.closeBatch();
+    assert.deepEqual(await hashswap.read.pendingBatchIds(), [1n, 2n]);
+    assert.equal((await hashswap.read.getBatch([3n])).status, 0, "a third batch is collecting");
+
+    // Resolve the later batch first. It must not depend on batch 1's residual
+    // being executable, and removing it must leave batch 1 independently live.
+    const second = await hashswap.read.getBatch([2n]);
+    const residual = await nox.read.peek([second.residualHandle]);
+    const isSell = (await nox.read.peek([second.sellSideHandle])) === 1n;
+    await hashswap.write.settle([2n, residual, uint256Proof(residual), isSell, boolProof(isSell)]);
+
+    assert.equal((await hashswap.read.getBatch([2n])).status, 2, "later batch settled");
+    assert.equal((await hashswap.read.getBatch([1n])).status, 1, "earlier batch remains pending");
+    assert.deepEqual(await hashswap.read.pendingBatchIds(), [1n]);
+  });
+
+  it("bounds the independent pending queue", async () => {
+    for (let batch = 1; batch <= 4; batch++) {
+      await submit(1, 6n * ONE, false);
+      await submit(2, 4n * ONE, false);
+      await submit(3, 8n * ONE, true);
+      await advancePastWindow();
+      await hashswap.write.closeBatch();
+    }
+
+    assert.equal((await hashswap.read.pendingBatchIds()).length, 4);
+
+    await submit(1, 6n * ONE, false);
+    await submit(2, 4n * ONE, false);
+    await submit(3, 8n * ONE, true);
+    await advancePastWindow();
+    await assert.rejects(hashswap.write.closeBatch(), /PendingBatchLimit|reverted/);
   });
 
   // ------------------------------------------------------------- reference price
 
-  it("settling re-anchors the open batch to the price just discovered", async () => {
+  it("settling an earlier batch does not mutate a successor's fixed reference", async () => {
     await submit(1, 6n * ONE, false);
     await submit(2, 4n * ONE, false);
     await submit(3, 8n * ONE, true);
@@ -434,11 +478,10 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
       boolProof(isSell),
     ]);
 
-    const cleared = (await hashswap.read.getBatch([1n])).clearingPrice;
-    assert.equal(
+    assertNear(
       (await hashswap.read.getBatch([2n])).refPrice,
-      cleared,
-      "the open batch must track the last traded price, or it goes stale and stops settling",
+      REF_PRICE,
+      "a successor keeps the price buyers saw when they funded it",
     );
   });
 

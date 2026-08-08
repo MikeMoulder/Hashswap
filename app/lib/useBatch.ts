@@ -22,7 +22,13 @@ export type BatchView = {
   residualIsSell: boolean;
 };
 
-export type BatchLimits = { min: number; max: number; win: number; bufferBps: bigint };
+export type BatchLimits = {
+  min: number;
+  max: number;
+  win: number;
+  settleTimeout: number;
+  bufferBps: bigint;
+};
 
 const POLL_MS = 6000;
 
@@ -83,10 +89,11 @@ export function useBatch(session: Session | null, tick: number, watchId?: bigint
     let dead = false;
     (async () => {
       try {
-        const [min, max, win, buffer] = await Promise.all([
+        const [min, max, win, settleTimeout, buffer] = await Promise.all([
           session.hashswap.MIN_BATCH_SIZE(),
           session.hashswap.MAX_BATCH_SIZE(),
           session.hashswap.BATCH_WINDOW(),
+          session.hashswap.SETTLE_TIMEOUT(),
           // Read, not copied. The client needs this to size a buy's collateral,
           // and a stale local copy below the contract's produces orders that
           // look placed and contribute nothing.
@@ -97,6 +104,7 @@ export function useBatch(session: Session | null, tick: number, watchId?: bigint
             min: Number(min),
             max: Number(max),
             win: Number(win),
+            settleTimeout: Number(settleTimeout),
             bufferBps: BigInt(buffer),
           });
       } catch {
@@ -134,5 +142,11 @@ export function useBatch(session: Session | null, tick: number, watchId?: bigint
   const secondsLeft = (b: BatchView | null) =>
     b && limits ? Math.max(0, limits.win - (now - b.openedAt)) : 0;
 
-  return { current, watched, limits, now, secondsLeft, refresh: load };
+  /// A Closed batch is either settled by the keeper or refunded once this
+  /// reaches zero. Showing that bound avoids presenting a price-guard retry as
+  /// an infinite spinner.
+  const secondsUntilCancellation = (b: BatchView | null) =>
+    b && limits && b.status === 1 ? Math.max(0, limits.settleTimeout - (now - b.closedAt)) : 0;
+
+  return { current, watched, limits, now, secondsLeft, secondsUntilCancellation, refresh: load };
 }

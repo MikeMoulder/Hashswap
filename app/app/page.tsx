@@ -25,7 +25,7 @@ export default function TradePage() {
   /// card and the strip read from the same poll.
   const [watchId, setWatchId] = useState<bigint | null>(null);
 
-  const { current, watched, limits, secondsLeft } = useBatch(session, tick, watchId);
+  const { current, watched, limits, secondsLeft, secondsUntilCancellation } = useBatch(session, tick, watchId);
 
   /// The wallet's live order, derived from chain state rather than remembered.
   /// This is what makes an order survive a refresh — and what tells the swap
@@ -92,6 +92,7 @@ export default function TradePage() {
               liveOrder={order !== null}
               limits={limits}
               secondsLeft={secondsLeft(mine)}
+              settlementSecondsLeft={secondsUntilCancellation(mine)}
               onWatchBatch={setWatchId}
               onViewOrder={() => setTab("orders")}
               /* Read straight from the chain rather than from the poll, because
@@ -120,6 +121,7 @@ export default function TradePage() {
                 batch={watched}
                 limits={limits}
                 secondsLeft={secondsLeft(watched)}
+                settlementSecondsLeft={secondsUntilCancellation(watched)}
               />
             )}
           </div>

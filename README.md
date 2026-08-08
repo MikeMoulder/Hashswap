@@ -239,10 +239,11 @@ position in the batch. It does not guarantee you beat trading alone: where nothi
 offsets, a small trader pays the group's average price, which can be worse.
 Crossed volume always wins. The leftover is fair, not free.
 
-**The price reference lags by one batch.** The 4% band is measured against the
-previous batch's price, so a patient attacker can nudge it a few percent at a
-time. That caps damage per batch but is not manipulation-proof. Reading the pool's
-own time-weighted price is the correct fix and is **not built**.
+**The price reference is sampled when each batch opens.** The pool's spot price
+is accepted only when it is close to its time-weighted mean; otherwise the batch
+falls back to its inherited reference. That avoids normally carrying a failed
+batch's price into its successors, but an unavailable oracle can still leave a
+batch temporarily stale.
 
 **The keeper's timing is not constrained.** It cannot forge the residual or pick
 the execution price, but it does choose when to submit. Fixing that needs

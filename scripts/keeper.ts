@@ -33,9 +33,15 @@ import { createEthersHandleClient, NotYetComputedHandleError } from "@iexec-nox/
 const POLL_MS = Number(process.env.KEEPER_POLL_INTERVAL_MS ?? 2500);
 const MAX_WAIT_MS = Number(process.env.KEEPER_MAX_WAIT_MS ?? 120_000);
 const TICK_MS = 15_000;
+/// How long a submitted tx may stay unmined before this process stops waiting
+/// on it. Sepolia blocks are ~12s, so a tx still absent after this was dropped
+/// or never broadcast, not merely slow.
+const TX_WAIT_MS = Number(process.env.KEEPER_TX_WAIT_MS ?? 90_000);
 
 const HS_ABI = [
   "function currentBatchId() view returns (uint256)",
+  "function pendingBatchIds() view returns (uint256[])",
+  "function MAX_PENDING_BATCHES() view returns (uint32)",
   "function pendingSettlement() view returns (uint256)",
   "function getBatch(uint256) view returns (tuple(uint64 openedAt,uint64 closedAt,uint32 count,uint8 status,bytes32 totalBuy,bytes32 totalSell,bytes32 residualHandle,bytes32 sellSideHandle,uint256 refPrice,uint256 residual,uint256 clearingPrice,bool residualIsSell, address maker, uint16 makerFeeBps))",
   "function settle(uint256,uint256,bytes,bool,bytes)",
@@ -67,6 +73,63 @@ const WAD = 10n ** 18n;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (m: string, d = "") =>
   console.log(`${new Date().toISOString().slice(11, 19)}  ${m.padEnd(30)} ${d}`);
+
+/// Submit a transaction and wait for it, bounded, putting the nonce back if
+/// anything goes wrong.
+///
+/// Two failure modes between them froze this process on Sepolia while pm2 still
+/// reported it healthy. `NonceManager` hands out a nonce before the send, and
+/// keeps it on a throw — so one transient revert leaves every later tx sitting
+/// behind a gap that can never mine. And a bare `.wait()` has no deadline, so
+/// the first such tx blocks the market loop forever: one wedged market stops
+/// all of them, because the loop is sequential.
+///
+/// Both are recoverable as long as the keeper re-reads its nonce from the chain
+/// and gets back to the next tick. Resetting may re-send a nonce that a dropped
+/// tx still holds; that is the safe direction to err, since the duplicate
+/// either replaces it or reverts, and callers already treat a failed submission
+/// as a normal outcome to retry.
+async function submit(
+  signer: ethers.NonceManager,
+  label: string,
+  send: () => Promise<ethers.ContractTransactionResponse>,
+): Promise<ethers.ContractTransactionReceipt | null> {
+  let tx: ethers.ContractTransactionResponse;
+  try {
+    tx = await send();
+  } catch (e) {
+    signer.reset();
+    throw e;
+  }
+  try {
+    return await Promise.race([
+      tx.wait(),
+      sleep(TX_WAIT_MS).then<never>(() => {
+        throw new Error(`${label} unmined after ${TX_WAIT_MS}ms (${tx.hash.slice(0, 10)}…)`);
+      }),
+    ]);
+  } catch (e) {
+    signer.reset();
+    throw e;
+  }
+}
+
+/// Does the deployed bytecode support independently settled closed batches?
+///
+/// Fresh deployments expose `pendingBatchIds`; older Sepolia deployments do
+/// not, so the keeper retains its single-batch fallback until they are replaced.
+async function hasIndependentQueue(c: ethers.Contract): Promise<boolean> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await c.pendingBatchIds();
+      return true;
+    } catch (e: any) {
+      if (e?.code === "CALL_EXCEPTION" && e?.data == null) return false;
+      if (attempt >= 2) throw e;
+      await sleep(2000);
+    }
+  }
+}
 
 /// Does the deployed bytecode carry `pendingSettlement`?
 ///
@@ -141,8 +204,12 @@ async function main() {
         "the host, not the whole .env.",
     );
   }
-  const signer = new ethers.Wallet("0x" + key.replace(/^0x/, ""), provider);
-  const hc = await createEthersHandleClient(signer as any);
+  const rawSigner = new ethers.Wallet("0x" + key.replace(/^0x/, ""), provider);
+  // A single keeper key is less operationally risky than a wallet pool. The
+  // nonce manager reserves a distinct nonce before each concurrent settlement
+  // submission, so independent batches cannot replace each other's txs.
+  const signer = new ethers.NonceManager(rawSigner);
+  const hc = await createEthersHandleClient(rawSigner as any);
 
   const markets = registry.markets.map((m: any) => ({
     ...m,
@@ -156,27 +223,40 @@ async function main() {
     m.minSize = Number(await m.contract.MIN_BATCH_SIZE());
     m.windowSec = Number(await m.contract.BATCH_WINDOW());
     m.settleTimeout = Number(await m.contract.SETTLE_TIMEOUT());
-    m.hasPending = await hasPendingSlot(m.contract);
+    m.hasIndependentQueue = await hasIndependentQueue(m.contract);
+    m.hasPending = !m.hasIndependentQueue && await hasPendingSlot(m.contract);
+    if (m.hasIndependentQueue) m.maxPending = Number(await m.contract.MAX_PENDING_BATCHES());
     m.devBps = BigInt(await m.contract.MAX_PRICE_DEVIATION_BPS());
   }
 
   const quoter = new ethers.Contract(registry.uniswap.quoterV2, QUOTER_ABI, provider);
 
-  log("keeper online", `${markets.length} markets, ${signer.address.slice(0, 10)}…`);
+  log("keeper online", `${markets.length} markets, ${rawSigner.address.slice(0, 10)}…`);
   for (const m of markets) {
-    log(`  watching ${m.id}`, `${m.hashswap}${m.hasPending ? "" : " (legacy: no pendingSettlement)"}`);
+    const mode = m.hasIndependentQueue
+      ? ` (${m.maxPending} concurrent pending batches)`
+      : m.hasPending
+        ? " (single pending batch)"
+        : " (legacy: no pendingSettlement)";
+    log(`  watching ${m.id}`, `${m.hashswap}${mode}`);
   }
 
   /// Can this residual execute inside the band `settle` will impose?
   ///
-  /// Mirrors the on-chain arithmetic: a sell must fetch at least `refPrice`
-  /// less the deviation, a buy must cost no more than `refPrice` plus it.
+  /// Mirrors the on-chain arithmetic, including the pool fee: a sell must
+  /// fetch at least the low end of the band after its output fee, while a buy
+  /// may cost the high end of the band plus its input fee. Omitting that fee
+  /// makes this pre-check stricter than `settle` and can leave settleable
+  /// batches waiting until their refund timeout.
   ///
   /// `null` means "could not tell" — a quoter hiccup must not be able to block a
   /// settlement that would have worked, so the caller tries anyway on null.
   async function withinBand(m: any, b: any, amount: bigint, isSell: boolean) {
     const ref: bigint = BigInt(b.refPrice);
     const dev: bigint = BigInt(m.devBps);
+    // Uniswap fees are expressed in millionths (10_000 is 1%); the contract
+    // stores the equivalent basis points as `poolFee / 100`.
+    const poolFeeBps = BigInt(m.fee) / 100n;
 
     // The contract skips the pool entirely when the residual is worth less than
     // one wei of quote, and settles at the reference price. Nothing to quote.
@@ -185,7 +265,9 @@ async function main() {
     const params = { fee: m.fee, sqrtPriceLimitX96: 0 };
     try {
       if (isSell) {
-        const floor = (amount * ((ref * (10_000n - dev)) / 10_000n)) / WAD;
+        const low = (ref * (10_000n - dev)) / 10_000n;
+        const execLow = (low * (10_000n - poolFeeBps)) / 10_000n;
+        const floor = (amount * execLow) / WAD;
         const [out] = await quoter.quoteExactInputSingle.staticCall({
           tokenIn: m.base.address,
           tokenOut: m.quote.address,
@@ -200,7 +282,9 @@ async function main() {
         return false;
       }
 
-      const ceiling = (amount * ((ref * (10_000n + dev)) / 10_000n)) / WAD;
+      const high = (ref * (10_000n + dev)) / 10_000n;
+      const execHigh = (high * (10_000n + poolFeeBps)) / 10_000n;
+      const ceiling = (amount * execHigh) / WAD;
       const [inn] = await quoter.quoteExactOutputSingle.staticCall({
         tokenIn: m.quote.address,
         tokenOut: m.base.address,
@@ -271,15 +355,15 @@ async function main() {
         // band reverts here, and the cancel below refunds it once the timeout
         // elapses — refusing to trade is the correct outcome, so this failing is
         // not a keeper fault.
-        const receipt = await (
-          await m.contract.settle(id, amount, known.residualProof, isSell, known.sideProof)
-        ).wait();
+        const receipt = await submit(signer, `${m.id} settle ${id}`, () =>
+          m.contract.settle(id, amount, known.residualProof, isSell, known.sideProof),
+        );
         const after = await m.contract.getBatch(id);
         const price = ethers.formatUnits(
           after.clearingPrice,
           18 + m.base.decimals - m.quote.decimals,
         );
-        log(`${m.id} batch ${id} settled`, `gas ${receipt.gasUsed}, price ${price} ${m.quote.symbol}`);
+        log(`${m.id} batch ${id} settled`, `gas ${receipt?.gasUsed}, price ${price} ${m.quote.symbol}`);
         plaintext.delete(cacheKey);
         return true;
       } catch (e: any) {
@@ -293,7 +377,7 @@ async function main() {
     // to call it, so there is no reason it should be.
     if (age >= m.settleTimeout) {
       log(`${m.id} cancelling ${id}`, `stuck ${age}s, refunding participants`);
-      await (await m.contract.cancelBatch(id)).wait();
+      await submit(signer, `${m.id} cancel ${id}`, () => m.contract.cancelBatch(id));
       plaintext.delete(cacheKey);
       return true;
     }
@@ -302,21 +386,48 @@ async function main() {
     return false;
   }
 
-  /// Close an open batch once its window is up. Below MIN_BATCH_SIZE the
-  /// contract rolls the window over instead, so calling close is harmless but
-  /// pointless.
+  /// Close an open batch once its window is up. A non-empty batch below
+  /// MIN_BATCH_SIZE rolls over unchanged, while an empty one also re-anchors
+  /// its reference price. That keeps a long-quiet market from handing its first
+  /// eventual participants a band fixed at deployment.
   async function closeIfReady(m: any, id: bigint, b: any) {
     const { minSize, windowSec } = m; // read once at startup
     const elapsed = Math.floor(Date.now() / 1000) - Number(b.openedAt);
-    if (Number(b.count) >= minSize && elapsed >= windowSec) {
-      log(`${m.id} closing batch ${id}`, `${b.count} orders`);
-      await (await m.contract.closeBatch()).wait();
+    const count = Number(b.count);
+    if (elapsed >= windowSec && (count >= minSize || count === 0)) {
+      log(`${m.id} ${count === 0 ? "refreshing empty batch" : "closing batch"} ${id}`, `${count} orders`);
+      await submit(signer, `${m.id} close ${id}`, () => m.contract.closeBatch());
     }
   }
 
   for (;;) {
     for (const m of markets) {
       try {
+        if (m.hasIndependentQueue) {
+          const pending: bigint[] = await m.contract.pendingBatchIds();
+
+          // The contract gives every closed batch its own fixed reference and
+          // status. Submit all currently eligible settlements together; ethers'
+          // NonceManager above allocates nonces safely from this one hot wallet.
+          await Promise.all(
+            pending.map(async (id) => {
+              const b = await m.contract.getBatch(id);
+              await clearBatch(m, id, b);
+            }),
+          );
+
+          // A full queue is intentional backpressure: keep collecting orders in
+          // the open batch, but do not lock a fifth batch until one of the four
+          // independent pending batches settles or refunds.
+          const remaining: bigint[] = await m.contract.pendingBatchIds();
+          if (remaining.length < m.maxPending) {
+            const current: bigint = await m.contract.currentBatchId();
+            const b = await m.contract.getBatch(current);
+            if (Number(b.status) === 0) await closeIfReady(m, current, b);
+          }
+          continue;
+        }
+
         if (m.hasPending) {
           // Settlement first, always. `closeBatch` reverts while a batch is
           // still owed a settlement, so a keeper that closed first would spend
