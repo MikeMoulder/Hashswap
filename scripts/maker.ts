@@ -32,7 +32,17 @@ const TICK_MS = 12_000;
 /// Act once the window is this close to expiring. Waiting gives real users a
 /// chance to fill the batch on their own, so the maker only steps in when the
 /// alternative is another empty rollover.
-const STEP_IN_AT_SEC = 20;
+///
+/// It has to leave enough runway to actually finish, which 20s did not: a warm
+/// rescue is a gateway round-trip plus one transaction per lane, and Sepolia
+/// mines in ~12s, so the maker reliably started work it could not land inside
+/// the window it was trying to save. Every rescue arrived a batch late. At 45s
+/// — three quarters of a 60s window — real users still get first refusal, and
+/// `TICK_MS` granularity means the real trigger falls between 45s and 33s.
+///
+/// Tied to BATCH_WINDOW, not written as an absolute: a redeployment that
+/// changes the window would otherwise silently reintroduce the same bug.
+const STEP_IN_AT_FRACTION = 0.75;
 
 const HS_ABI = [
   "function currentBatchId() view returns (uint256)",
@@ -147,6 +157,35 @@ async function main() {
     laneHc.push(await createEthersHandleClient(lanes[i] as any));
   }
 
+  /// Nonce-managed view of each lane, for sending only.
+  ///
+  /// A rescue used to be one long chain of awaited transactions — fund lane 0,
+  /// deposit it, submit it, then start lane 1 — which on Sepolia's ~12s blocks
+  /// meant three minutes to place two orders, against a 60s window. The work is
+  /// mostly independent and now runs concurrently, which needs nonces allocated
+  /// up front rather than read from the chain per send.
+  ///
+  /// Exactly one manager per address. Lane 0 *is* the maker, and funding
+  /// transfers to the other lanes come from that same key — a second manager
+  /// over it would cache its own nonce and collide with this one.
+  ///
+  /// The raw wallets stay in `lanes` on purpose: `laneHc` above is built from
+  /// them, and the handle clients sign off-chain where nonces play no part.
+  const nonced = lanes.map((l) => new ethers.NonceManager(l));
+
+  /// A failed send leaves `NonceManager` holding a nonce it already handed out,
+  /// so every later transaction from that lane inherits a gap and none of them
+  /// can mine. Resetting re-reads from the chain and costs one RPC call, which
+  /// is nothing next to a lane that silently stops working until restart.
+  async function sent<T>(i: number, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (e) {
+      nonced[i].reset();
+      throw e;
+    }
+  }
+
   for (let i = 1; i < lanes.length; i++) {
     log(`  lane ${i}`, `${lanes[i].address} (alternates side each batch)`);
   }
@@ -201,63 +240,76 @@ async function main() {
     const lane = lanes[i];
     const size = clip(m);
 
+    // Serial, and before the concurrent section below: this spends from the
+    // maker key, and a top-up racing the funding transfers that follow would be
+    // two sends contending for the same nonce to no benefit. In practice it is
+    // a no-op — lanes sit well above the floor — so it costs a balance read.
     if (i > 0) await ensureGas(signer, lane, { log });
 
-    for (const side of ["base", "quote"] as const) {
-      const token = side === "base" ? m.base : m.quote;
-      const need =
-        side === "base"
-          ? size * REFILL_CLIPS
-          : (size * BigInt(m.refPrice) * 110n * REFILL_CLIPS) / (10n ** 18n * 100n);
+    // Base and quote are independent pipelines over different tokens, so the
+    // approve→deposit ordering that matters holds within each side while the
+    // two sides overlap. Halves the funding leg of a cold lane.
+    await Promise.all(
+      (["base", "quote"] as const).map(async (side) => {
+        const token = side === "base" ? m.base : m.quote;
+        const need =
+          side === "base"
+            ? size * REFILL_CLIPS
+            : (size * BigInt(m.refPrice) * 110n * REFILL_CLIPS) / (10n ** 18n * 100n);
 
-      // Move inventory out to the lane first — lanes hold nothing by default.
-      if (i > 0) {
-        const fromMaker = new ethers.Contract(token.address, ERC20, signer);
-        const laneHeld: bigint = await fromMaker.balanceOf(lane.address);
-        if (laneHeld < need) {
-          const makerHeld: bigint = await fromMaker.balanceOf(signer.address);
-          const send = need - laneHeld;
-          if (makerHeld < send) {
-            log(
-              `${m.id} lane ${i} low ${token.symbol}`,
-              `maker holds ${ethers.formatUnits(makerHeld, token.decimals).slice(0, 10)}, wants ${ethers.formatUnits(send, token.decimals).slice(0, 10)} — run scripts/fund-maker.ts`,
-            );
-            if (makerHeld === 0n) continue;
-            await (await fromMaker.transfer(lane.address, makerHeld)).wait();
-          } else {
-            await (await fromMaker.transfer(lane.address, send)).wait();
+        // Move inventory out to the lane first — lanes hold nothing by default.
+        if (i > 0) {
+          const fromMaker = new ethers.Contract(token.address, ERC20, nonced[0]);
+          const laneHeld: bigint = await fromMaker.balanceOf(lane.address);
+          if (laneHeld < need) {
+            const makerHeld: bigint = await fromMaker.balanceOf(signer.address);
+            const send = need - laneHeld;
+            if (makerHeld < send) {
+              log(
+                `${m.id} lane ${i} low ${token.symbol}`,
+                `maker holds ${ethers.formatUnits(makerHeld, token.decimals).slice(0, 10)}, wants ${ethers.formatUnits(send, token.decimals).slice(0, 10)} — run scripts/fund-maker.ts`,
+              );
+              if (makerHeld === 0n) return;
+              await sent(0, async () => (await fromMaker.transfer(lane.address, makerHeld)).wait());
+            } else {
+              await sent(0, async () => (await fromMaker.transfer(lane.address, send)).wait());
+            }
           }
         }
-      }
 
-      const erc = new ethers.Contract(token.address, ERC20, lane);
-      const vault = new ethers.Contract(m.hashswap, HS_ABI, lane);
-      const held: bigint = await erc.balanceOf(lane.address);
-      if (held === 0n) continue;
+        const erc = new ethers.Contract(token.address, ERC20, nonced[i]);
+        const vault = new ethers.Contract(m.hashswap, HS_ABI, nonced[i]);
+        const held: bigint = await erc.balanceOf(lane.address);
+        if (held === 0n) return;
 
-      const amount = held < need ? held : need;
-      await (await erc.approve(m.hashswap, amount)).wait();
-      await (await vault.deposit(token.address, amount)).wait();
-      log(
-        `${m.id} lane ${i} funded`,
-        `${ethers.formatUnits(amount, token.decimals).slice(0, 10)} ${token.symbol}`,
-      );
-    }
+        const amount = held < need ? held : need;
+        await sent(i, async () => (await erc.approve(m.hashswap, amount)).wait());
+        await sent(i, async () => (await vault.deposit(token.address, amount)).wait());
+        log(
+          `${m.id} lane ${i} funded`,
+          `${ethers.formatUnits(amount, token.decimals).slice(0, 10)} ${token.symbol}`,
+        );
+      }),
+    );
 
     prepared.add(key);
   }
 
   async function submitFromLane(m: any, i: number, batchId: bigint) {
-    const lane = lanes[i];
     const isBuy = laneIsBuy(i, batchId);
     const size = clip(m);
-    const vault = new ethers.Contract(m.hashswap, HS_ABI, lane);
+    const vault = new ethers.Contract(m.hashswap, HS_ABI, nonced[i]);
 
-    const a = await laneHc[i].encryptInput(size, "uint256", m.hashswap);
-    const s = await laneHc[i].encryptInput(isBuy, "bool", m.hashswap);
-    return await (
-      await vault.submitIntent(a.handle, a.handleProof, s.handle, s.handleProof)
-    ).wait();
+    // Both encryptions are gateway round-trips against the same client, and
+    // neither reads the other's output — the amount and the side are separate
+    // inputs to one intent.
+    const [a, s] = await Promise.all([
+      laneHc[i].encryptInput(size, "uint256", m.hashswap),
+      laneHc[i].encryptInput(isBuy, "bool", m.hashswap),
+    ]);
+    return await sent(i, async () =>
+      (await vault.submitIntent(a.handle, a.handleProof, s.handle, s.handleProof)).wait(),
+    );
   }
 
   for (;;) {
@@ -277,7 +329,7 @@ async function main() {
         // it at all — a batch of only maker orders would be pointless.
         if (count >= minSize) continue;
         if (count === 0) continue;
-        if (remaining > STEP_IN_AT_SEC) continue;
+        if (remaining > Math.floor(windowSec * STEP_IN_AT_FRACTION)) continue;
 
         const missing = minSize - count;
 
@@ -349,34 +401,41 @@ async function main() {
           `${count} orders, ${remaining}s left, adding ${picks.length}`,
         );
 
-        for (const i of picks) {
-          try {
-            // Preparing a cold lane costs several transactions and may overrun
-            // the window. That is fine: an under-filled batch rolls over rather
-            // than settling, so the rescue lands on the next one and the lane
-            // stays funded for every rescue after that.
-            await prepareLane(m, i);
+        // Concurrently, one task per lane. Each lane is its own address with its
+        // own nonce, so the only shared resource is the maker key used to fund
+        // them — which `nonced[0]` serialises. Run sequentially this was the
+        // whole latency: every lane waited out the one before it for no reason,
+        // and a two-lane rescue took twice as long as it needed to.
+        await Promise.all(
+          picks.map(async (i) => {
+            try {
+              // Preparing a cold lane still costs several transactions and may
+              // overrun the window. That is fine: an under-filled batch rolls
+              // over rather than settling, so the rescue lands on the next one
+              // and the lane stays funded for every rescue after that.
+              await prepareLane(m, i);
 
-            const r = await submitFromLane(m, i, id);
-            spent.add(i);
-            log(
-              `  lane ${i} ${laneIsBuy(i, id) ? "buy " : "sell"} ${ethers.formatUnits(clip(m), m.base.decimals)}`,
-              `gas ${r.gasUsed}`,
-            );
-          } catch (e: any) {
-            const msg = `${e?.shortMessage ?? ""} ${e?.message ?? ""}`;
-            // The contract rejects a second intent from the same address. If we
-            // get here the lane is already in this batch — most likely from a
-            // previous run, since the in-memory record does not survive a
-            // restart. Retire the lane for this batch rather than retrying it.
-            if (/AlreadySubmitted|unknown custom error|execution reverted/i.test(msg)) {
+              const r = await submitFromLane(m, i, id);
               spent.add(i);
-              log(`  lane ${i} already in batch`, "retiring it for this batch");
-            } else {
-              log(`  lane ${i} failed`, msg.trim().slice(0, 70));
+              log(
+                `  lane ${i} ${laneIsBuy(i, id) ? "buy " : "sell"} ${ethers.formatUnits(clip(m), m.base.decimals)}`,
+                `gas ${r.gasUsed}`,
+              );
+            } catch (e: any) {
+              const msg = `${e?.shortMessage ?? ""} ${e?.message ?? ""}`;
+              // The contract rejects a second intent from the same address. If
+              // we get here the lane is already in this batch — most likely from
+              // a previous run, since the in-memory record does not survive a
+              // restart. Retire the lane for this batch rather than retrying it.
+              if (/AlreadySubmitted|unknown custom error|execution reverted/i.test(msg)) {
+                spent.add(i);
+                log(`  lane ${i} already in batch`, "retiring it for this batch");
+              } else {
+                log(`  lane ${i} failed`, msg.trim().slice(0, 70));
+              }
             }
-          }
-        }
+          }),
+        );
       } catch (e: any) {
         log(`${m.id} error`, (e?.shortMessage ?? e?.message ?? String(e)).slice(0, 70));
       }
