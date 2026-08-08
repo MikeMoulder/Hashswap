@@ -18,9 +18,25 @@ const TEE_UINT256 = 35;
 const REF_PRICE = 2000n * WAD; // 2000 quote per base
 const POOL_FEE = 3000;
 
+/// Reference prices now come from the pool rather than from the contract's own
+/// last trade, which means they arrive via a real Q64.96 `sqrtPriceX96` and an
+/// integer square root. A WAD price round-trips through that a few parts in
+/// 1e12 off its nominal value.
+///
+/// Compare with a tolerance rather than exactly. Making these assertions exact
+/// again would mean a mock that hands back the number it was given, which would
+/// pass whether or not the conversion under test worked at all.
+function assertNear(actual: bigint, expected: bigint, what: string, toleranceBps = 1n) {
+  const diff = actual > expected ? actual - expected : expected - actual;
+  assert.ok(
+    diff * 10_000n <= expected * toleranceBps,
+    `${what} — got ${actual}, expected ~${expected}`,
+  );
+}
+
 describe("Stages 2-3 — batching, netting, settlement", () => {
   let viem: any, nox: any, provider: any;
-  let hashswap: any, base: any, quote: any, router: any;
+  let hashswap: any, base: any, quote: any, router: any, pool: any;
   let wallets: any[];
   let users: `0x${string}`[];
 
@@ -41,11 +57,20 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await router.write.seed([base.address, 10_000n * ONE]);
     await router.write.seed([quote.address, 20_000_000n * ONE]);
 
+    pool = await viem.deployContract("MockUniswapV3Pool", [
+      base.address,
+      quote.address,
+      POOL_FEE,
+      REF_PRICE,
+      base.address,
+    ]);
+
     hashswap = await viem.deployContract("HashSwap", [
       base.address,
       quote.address,
       POOL_FEE,
       router.address,
+      pool.address,
       REF_PRICE,
     ]);
 
@@ -222,7 +247,13 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
       poolBefore,
       "a fully internalised batch leaves zero on-chain trace in the pool",
     );
-    assert.equal((await hashswap.read.getBatch([1n])).clearingPrice, REF_PRICE);
+    // Nothing traded, so the batch clears at its own reference — which is now
+    // the pool's price at open rather than a number handed to the constructor.
+    assertNear(
+      (await hashswap.read.getBatch([1n])).clearingPrice,
+      REF_PRICE,
+      "a fully internalised batch clears at its reference price",
+    );
   });
 
   it("net-buy residual settles through an exact-output swap", async () => {
@@ -386,10 +417,10 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     await advancePastWindow();
     await hashswap.write.closeBatch();
 
-    assert.equal(
+    assertNear(
       (await hashswap.read.getBatch([2n])).refPrice,
       REF_PRICE,
-      "successor opens on the old reference — the new one does not exist yet",
+      "successor opens on the pool's price, which has not moved yet",
     );
 
     const b = await hashswap.read.getBatch([1n]);
@@ -435,7 +466,7 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
       boolProof(isSell),
     ]);
 
-    assert.equal(
+    assertNear(
       (await hashswap.read.getBatch([2n])).refPrice,
       REF_PRICE,
       "a batch that has taken an order keeps the reference it advertised",
@@ -552,8 +583,120 @@ describe("Stages 2-3 — batching, netting, settlement", () => {
     // The frontend has to know this number to size a deposit. Reading it beats
     // copying it: a client copy that drifts below the contract's produces orders
     // that look placed and do nothing.
-    assert.equal(await hashswap.read.BUFFER_BPS(), 10_500n);
+    // Derived from the band, the pool's fee, and the maker fee cap rather than
+    // written down, so assert the derivation rather than a copied constant —
+    // a hardcoded expectation here would have to be edited in lockstep with the
+    // contract, which is the coupling the change removed.
+    const band = BigInt(await hashswap.read.MAX_PRICE_DEVIATION_BPS());
+    const poolBps = BigInt(await hashswap.read.poolFeeBps());
+    const makerCap = BigInt(await hashswap.read.MAX_MAKER_FEE_BPS());
+    const worst = (10_000n + band) * (10_000n + poolBps) * (10_000n + makerCap);
+    const expected = (worst + (10n ** 8n - 1n)) / 10n ** 8n;
+
+    assert.equal(await hashswap.read.BUFFER_BPS(), expected);
+    assert.ok(expected >= 10_000n, "a buffer below par would under-collateralise every buy");
   });
+  // --------------------------------------------------------- pool-priced batches
+
+  it("prices correctly whichever side of the pool the base token sits on", async () => {
+    // token0/token1 is decided by address order and says nothing about which
+    // token is the base, so `PoolOracle` has to invert the ratio for half of all
+    // pairs. Every market deployed so far happens to land on the same side of
+    // that branch, which means the other half is exercised only here.
+    const P = 1234n * WAD;
+    const [low, high] =
+      base.address.toLowerCase() < quote.address.toLowerCase() ? [base, quote] : [quote, base];
+
+    for (const [b, q, label] of [
+      [low, high, "base is token0"],
+      [high, low, "base is token1"],
+    ] as const) {
+      const p = await viem.deployContract("MockUniswapV3Pool", [
+        b.address,
+        q.address,
+        POOL_FEE,
+        P,
+        b.address,
+      ]);
+      const hs = await viem.deployContract("HashSwap", [
+        b.address,
+        q.address,
+        POOL_FEE,
+        router.address,
+        p.address,
+        P,
+      ]);
+      assertNear((await hs.read.getBatch([1n])).refPrice, P, label);
+    }
+  });
+
+  it("a cancelled batch does not hand its stale price to the successor", async () => {
+    // The ratchet, as a test. A batch that fails to settle used to reopen its
+    // successor on the same reference that just failed, so one unsettleable
+    // batch begat the next indefinitely — on Sepolia one market drifted 60% from
+    // its pool this way and could no longer clear a buy of any size.
+    await submit(1, 1n * ONE, false);
+    await submit(2, 1n * ONE, true);
+    await submit(3, 1n * ONE, false);
+    await advancePastWindow();
+
+    // The market moves before the batch closes. `closeBatch` opens the
+    // successor, so that is the moment the new reference is chosen.
+    const moved = (REF_PRICE * 130n) / 100n;
+    await pool.write.setPrice([moved, base.address]);
+    await hashswap.write.closeBatch();
+
+    assertNear(
+      (await hashswap.read.getBatch([2n])).refPrice,
+      moved,
+      "the successor must open on the pool, not on the reference it inherited",
+    );
+  });
+
+  it("falls back to the inherited price when spot has been pushed off the mean", async () => {
+    await submit(1, 1n * ONE, false);
+    await submit(2, 1n * ONE, true);
+    await submit(3, 1n * ONE, false);
+    await advancePastWindow();
+
+    // Spot far from the time-weighted mean is what a manipulation attempt looks
+    // like from inside the contract. Pricing off it is exactly what must not
+    // happen — and reverting is equally unacceptable, because `_openBatch` sits
+    // on the path that lets a stuck batch refund.
+    await pool.write.setPrice([(REF_PRICE * 130n) / 100n, base.address]);
+    await pool.write.setTicks([5000, 0]);
+    await hashswap.write.closeBatch();
+
+    const successor = await hashswap.read.getBatch([2n]);
+    assertNear(
+      successor.refPrice,
+      REF_PRICE,
+      "a manipulated pool must not set the reference — the inherited one stands",
+    );
+    assert.equal(successor.status, 0, "and the batch must still have opened");
+  });
+
+  it("a pool with one observation cannot be used as an oracle", async () => {
+    // `observe` on a single-observation pool extrapolates from the current tick,
+    // so the "mean" it returns is spot wearing a costume and the deviation check
+    // would be comparing a value against itself. The WETH-LINK pool on Sepolia
+    // was in exactly this state.
+    await submit(1, 1n * ONE, false);
+    await submit(2, 1n * ONE, true);
+    await submit(3, 1n * ONE, false);
+    await advancePastWindow();
+
+    await pool.write.setPrice([(REF_PRICE * 130n) / 100n, base.address]);
+    await pool.write.setCardinality([1]);
+    await hashswap.write.closeBatch();
+
+    assertNear(
+      (await hashswap.read.getBatch([2n])).refPrice,
+      REF_PRICE,
+      "one observation is not an oracle",
+    );
+  });
+
   // ------------------------------------------------------- stuck-batch liveness
 
   // MIN_BATCH_SIZE means a quiet market can roll a batch forever. Without an

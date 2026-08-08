@@ -8,7 +8,9 @@ import {Nox, euint256, ebool, externalEuint256, externalEbool}
 import {HashSwapVault} from "./HashSwapVault.sol";
 import {BatchMath} from "./lib/BatchMath.sol";
 import {UniswapAdapter} from "./lib/UniswapAdapter.sol";
+import {PoolOracle} from "./lib/PoolOracle.sol";
 import {ISwapRouter02} from "./interfaces/ISwapRouter02.sol";
+import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
 
 /// @title HashSwap
 /// @notice Confidential batch-netting over an unmodified Uniswap v3 pool.
@@ -45,10 +47,22 @@ contract HashSwap is HashSwapVault {
 
     uint256 public constant WAD = 1e18;
 
-    /// @dev Buyers lock 105% of the reference cost at submit time. `settle`
-    ///      refuses any clearing price that would exceed what that buffer covers
+    /// @dev Buyers lock this much of the reference cost at submit time. `settle`
+    ///      refuses any clearing price that would exceed what the buffer covers
     ///      (see `MAX_PRICE_DEVIATION_BPS`), so the lock is always sufficient.
-    uint256 public constant BUFFER_BPS = 10_500;
+    ///
+    ///      Derived in the constructor rather than written down, because it is
+    ///      not a free parameter: it is a consequence of the band, the pool's
+    ///      fee, and the maker fee cap. It used to be a hand-set 10_500 with the
+    ///      relationship recorded only in a comment, which is a standing
+    ///      invitation to widen the band later and reintroduce the insolvency
+    ///      the comment warns about. Now the relationship is computed, and the
+    ///      constructor asserts it.
+    uint256 public immutable BUFFER_BPS;
+
+    /// @dev The pool's own fee, in basis points. `poolFee` is in hundredths of a
+    ///      basis point (10_000 = 1%), which is Uniswap's unit, not ours.
+    uint256 public immutable poolFeeBps;
 
     /// @notice How far the realized clearing price may drift from the batch's
     ///         reference price before settlement is refused, in basis points.
@@ -63,8 +77,16 @@ contract HashSwap is HashSwapVault {
     ///          (10_000 + MAX_PRICE_DEVIATION_BPS) * (10_000 + MAX_MAKER_FEE_BPS)
     ///              <= BUFFER_BPS * 10_000
     ///
-    ///      which at 400 / 50 / 10_500 is 104,520,000 <= 105,000,000. Raising
-    ///      this without raising `BUFFER_BPS` reintroduces the insolvency.
+    ///      which the constructor now enforces directly, with the pool's own fee
+    ///      as a third factor — see `BUFFER_BPS`. Raising this alone can no
+    ///      longer reintroduce the insolvency, because the buffer is computed
+    ///      from it rather than maintained alongside it by hand.
+    ///
+    ///      **This bounds price risk only.** The pool's fee is a known constant,
+    ///      not a surprise, and charging it against this band was costing a
+    ///      quarter of the budget on a 1% pool for nothing — enough that a 2%
+    ///      market move made batches unsettleable. `settle` now adds the fee to
+    ///      the execution bounds explicitly and this number means what it says.
     ///
     ///      The lower half of the band protects sellers symmetrically, and
     ///      incidentally makes a zero clearing price unreachable — a zero would
@@ -129,6 +151,12 @@ contract HashSwap is HashSwapVault {
     address public immutable quoteToken;
     uint24 public immutable poolFee;
     ISwapRouter02 public immutable swapRouter;
+
+    /// @dev The pool this market settles against, and now also prices against.
+    ///      Validated in the constructor to be the same pool the router will
+    ///      route through, so the price a batch is opened at and the price it
+    ///      settles at cannot come from different markets.
+    IUniswapV3Pool public immutable pool;
 
     /// @notice Who may configure the maker. Set once, at deployment.
     address public immutable owner;
@@ -199,6 +227,15 @@ contract HashSwap is HashSwapVault {
     );
     event BatchCancelled(uint256 indexed batchId);
     event BatchRepriced(uint256 indexed batchId, uint256 refPrice);
+
+    /// @notice The pool could not be read when this batch opened, so it fell
+    ///         back to an inherited reference price.
+    /// @dev Worth alerting on. It means either spot has been pushed away from
+    ///      the mean — someone probing the band — or the pool's observation
+    ///      history has become too thin to consult. Both are conditions under
+    ///      which this market is pricing off history again, which is the
+    ///      failure mode the oracle exists to end.
+    event ReferencePriceStale(uint256 indexed batchId, uint256 refPrice);
     event MakerUpdated(address indexed maker, uint16 feeBps);
     event MakerPaid(uint256 indexed batchId, address indexed maker);
     event BatchRolledOver(uint256 indexed batchId, uint32 count);
@@ -223,23 +260,51 @@ contract HashSwap is HashSwapVault {
         address quoteToken_,
         uint24 poolFee_,
         ISwapRouter02 swapRouter_,
+        IUniswapV3Pool pool_,
         uint256 initialRefPrice
     ) {
         // A zero reference price makes `quoteNeeded` zero for every buyer, so
         // buys would join the batch fully collateralised by nothing. The price
         // band keeps a live market away from zero; this keeps a fresh deployment
         // from starting there.
+        //
+        // `initialRefPrice` is now only a fallback — `_openBatch` prices from
+        // the pool — but it still has to be sane, because it is what the market
+        // falls back to if the pool is unreadable at the moment of deployment.
         if (
             baseToken_ == address(0) || quoteToken_ == address(0)
                 || baseToken_ == quoteToken_ || address(swapRouter_) == address(0)
-                || initialRefPrice == 0
+                || address(pool_) == address(0) || initialRefPrice == 0
         ) revert InvalidConfig();
+
+        // Bind the pool to this market rather than trusting the deployer to pass
+        // a matching one. A pool for the wrong pair, or the right pair at the
+        // wrong fee tier, would price every batch off an unrelated market while
+        // looking entirely healthy — and settlement would route through the
+        // correct pool regardless, so the two would silently disagree forever.
+        address t0 = pool_.token0();
+        address t1 = pool_.token1();
+        bool pairMatches = (t0 == baseToken_ && t1 == quoteToken_)
+            || (t0 == quoteToken_ && t1 == baseToken_);
+        if (!pairMatches || pool_.fee() != poolFee_) revert InvalidConfig();
 
         baseToken = baseToken_;
         quoteToken = quoteToken_;
         poolFee = poolFee_;
+        poolFeeBps = uint256(poolFee_) / 100;
         swapRouter = swapRouter_;
+        pool = pool_;
         owner = msg.sender;
+
+        // Buyers must post enough to cover the worst price `settle` will accept:
+        // the top of the band, plus the pool's fee, plus the maker's spread.
+        // Rounded up — rounding down would leave the last buyer a wei short of
+        // the fill they are owed, which is the exact insolvency this guards.
+        uint256 worst = (10_000 + uint256(MAX_PRICE_DEVIATION_BPS))
+            * (10_000 + poolFeeBps)
+            * (10_000 + uint256(MAX_MAKER_FEE_BPS));
+        BUFFER_BPS = (worst + (1e8 - 1)) / 1e8;
+
         _openBatch(initialRefPrice);
     }
 
@@ -498,6 +563,15 @@ contract HashSwap is HashSwapVault {
         uint256 lowPrice = refPrice * (10_000 - MAX_PRICE_DEVIATION_BPS) / 10_000;
         uint256 highPrice = refPrice * (10_000 + MAX_PRICE_DEVIATION_BPS) / 10_000;
 
+        // The band above bounds price risk. The pool also charges its own fee,
+        // which is a known constant rather than a risk, so it is added here
+        // instead of being silently subtracted from the band — on a 1% pool that
+        // was a quarter of the whole budget, enough that an ordinary 2% market
+        // move left batches unable to clear at any size. Buyers' collateral
+        // covers exactly this, by construction: see `BUFFER_BPS`.
+        uint256 execLow = lowPrice * (10_000 - poolFeeBps) / 10_000;
+        uint256 execHigh = highPrice * (10_000 + poolFeeBps) / 10_000;
+
         // Mark settled before touching Uniswap. The swap is the only external
         // call in this function and the tokens are constructor parameters, so a
         // token with a transfer hook could otherwise re-enter a batch that still
@@ -519,7 +593,7 @@ contract HashSwap is HashSwapVault {
                 quoteToken,
                 poolFee,
                 residual,
-                residual * lowPrice / WAD, // minOut
+                residual * execLow / WAD, // minOut
                 address(this)
             );
             clearingPrice = quoteOut * WAD / residual;
@@ -530,7 +604,7 @@ contract HashSwap is HashSwapVault {
                 baseToken,
                 poolFee,
                 residual,
-                residual * highPrice / WAD, // maxIn
+                residual * execHigh / WAD, // maxIn
                 address(this)
             );
             clearingPrice = quoteIn * WAD / residual;
@@ -539,8 +613,8 @@ contract HashSwap is HashSwapVault {
         // The swap's own limit only bounds one side of the band; this closes the
         // other. Sells cannot execute below `lowPrice` but could in principle
         // print above `highPrice`, and buys the reverse.
-        if (clearingPrice < lowPrice || clearingPrice > highPrice) {
-            revert PriceOutOfBand(clearingPrice, lowPrice, highPrice);
+        if (clearingPrice < execLow || clearingPrice > execHigh) {
+            revert PriceOutOfBand(clearingPrice, execLow, execHigh);
         }
 
         b.residual = residual;
@@ -714,7 +788,27 @@ contract HashSwap is HashSwapVault {
 
     // ---------------------------------------------------------------- internals
 
-    function _openBatch(uint256 refPrice) private {
+    /// @param inherited Reference price to use if the pool cannot be read: the
+    ///        clearing price after a settle, the outgoing batch's reference
+    ///        after a cancel, `initialRefPrice` at deployment.
+    ///
+    /// @dev The reference now comes from the pool, and `inherited` is only a
+    ///      fallback. Inheriting was the whole disease: a reference derived from
+    ///      this contract's own last successful trade froze the moment trading
+    ///      stopped, and a frozen reference is exactly what stops trading. A
+    ///      cancelled batch handed its stale price to its successor, so one
+    ///      unsettleable batch begat the next indefinitely.
+    ///
+    ///      Falling back rather than reverting is deliberate. This runs inside
+    ///      `settle` and `cancelBatch`, so a revert here would let anyone who
+    ///      can briefly disturb the pool wedge a batch that is trying to clear
+    ///      or, worse, one that is trying to refund. A stale price is a bad
+    ///      price; an unrefundable batch is a broken contract.
+    function _openBatch(uint256 inherited) private {
+        (bool ok, uint256 fromPool) = PoolOracle.refPrice(pool, baseToken);
+        uint256 refPrice = (ok && fromPool != 0) ? fromPool : inherited;
+        if (!ok) emit ReferencePriceStale(currentBatchId + 1, inherited);
+
         uint256 id = ++currentBatchId;
         Batch storage b = _batches[id];
         b.openedAt = uint64(block.timestamp);

@@ -88,11 +88,17 @@ async function main() {
       Number(refPrice) / 1e18 * 10 ** (base.decimals - quote.decimals);
     console.log(`  reference  1 ${base.symbol} = ${human.toFixed(4)} ${quote.symbol}`);
 
+    // `refPrice` is now only the fallback the market opens on if the pool
+    // cannot be read at this instant — `_openBatch` prices from the pool from
+    // here on. The constructor also checks that this pool really is the pair
+    // and fee tier being deployed, so a copy-paste error in the table above
+    // fails here rather than pricing every batch off an unrelated market.
     const hashswap = await viem.deployContract("HashSwap", [
       base.address,
       quote.address,
       m.fee,
       UNISWAP.swapRouter02,
+      m.pool,
       refPrice,
     ]);
     console.log(`  hashswap   ${hashswap.address}\n`);

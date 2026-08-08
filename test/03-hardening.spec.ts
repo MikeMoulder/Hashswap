@@ -18,7 +18,7 @@ const POOL_FEE = 3000;
 
 describe("Hardening — audit regressions", () => {
   let viem: any, nox: any, provider: any;
-  let hashswap: any, base: any, quote: any, router: any;
+  let hashswap: any, base: any, quote: any, router: any, pool: any;
   let wallets: any[];
   let users: `0x${string}`[];
 
@@ -38,11 +38,20 @@ describe("Hardening — audit regressions", () => {
     await router.write.seed([base.address, 10_000n * ONE]);
     await router.write.seed([quote.address, 20_000_000n * ONE]);
 
+    pool = await viem.deployContract("MockUniswapV3Pool", [
+      base.address,
+      quote.address,
+      POOL_FEE,
+      REF_PRICE,
+      base.address,
+    ]);
+
     hashswap = await viem.deployContract("HashSwap", [
       base.address,
       quote.address,
       POOL_FEE,
       router.address,
+      pool.address,
       REF_PRICE,
     ]);
 
@@ -234,7 +243,7 @@ describe("Hardening — audit regressions", () => {
 
   it("a zero reference price cannot be deployed", async () => {
     await assert.rejects(
-      viem.deployContract("HashSwap", [base.address, quote.address, POOL_FEE, router.address, 0n]),
+      viem.deployContract("HashSwap", [base.address, quote.address, POOL_FEE, router.address, pool.address, 0n]),
       "refPrice = 0 makes quoteNeeded zero for every buyer",
     );
   });

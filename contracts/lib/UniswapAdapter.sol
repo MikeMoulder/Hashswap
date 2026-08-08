@@ -20,6 +20,18 @@ import {ISwapRouter02} from "../interfaces/ISwapRouter02.sol";
 library UniswapAdapter {
     using SafeERC20 for IERC20;
 
+    /// @notice The pool wanted more than the batch's band allows.
+    /// @dev The band working as designed, not a fault. Distinguished from
+    ///      `InsufficientInventory` below because Uniswap reports both as the
+    ///      same opaque `"STF"` — the router's `transferFrom` fails identically
+    ///      whether the allowance was capped or the balance was short, and those
+    ///      mean completely different things. One is a batch that should refuse
+    ///      to trade; the other is a vault that is short and needs looking at.
+    error ExecutionOutsideBand(uint256 allowed);
+
+    /// @notice The contract does not hold what it is trying to spend.
+    error InsufficientInventory(uint256 held, uint256 needed);
+
     /// @notice Swap the batch residual through a real Uniswap v3 pool.
     /// @param minOut Slippage floor. Must be derived from a manipulation-resistant
     ///        source (the pool's `observe` TWAP), never from `slot0` spot — this
@@ -69,7 +81,7 @@ library UniswapAdapter {
     ) internal returns (uint256 amountIn) {
         IERC20(tokenIn).forceApprove(address(router), maxIn);
 
-        amountIn = router.exactOutputSingle(
+        try router.exactOutputSingle(
             ISwapRouter02.ExactOutputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: tokenOut,
@@ -79,7 +91,19 @@ library UniswapAdapter {
                 amountInMaximum: maxIn,
                 sqrtPriceLimitX96: 0
             })
-        );
+        ) returns (uint256 spent) {
+            amountIn = spent;
+        } catch {
+            // The allowance was set to exactly `maxIn` above, so if the balance
+            // covers `maxIn` the only thing `transferFrom` can have run out of
+            // is allowance — which means the pool demanded more than the band
+            // permits. If the balance does not cover it, the shortfall is ours
+            // and says so.
+            uint256 held = IERC20(tokenIn).balanceOf(address(this));
+            IERC20(tokenIn).forceApprove(address(router), 0);
+            if (held < maxIn) revert InsufficientInventory(held, maxIn);
+            revert ExecutionOutsideBand(maxIn);
+        }
 
         IERC20(tokenIn).forceApprove(address(router), 0);
     }

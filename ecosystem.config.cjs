@@ -16,6 +16,20 @@
 const NODE_22 = "/root/.nvm/versions/node/v22.23.2/bin/node";
 const HARDHAT = "./node_modules/hardhat/dist/src/cli.js";
 
+// COMPILE ON START
+// `hardhat run` builds the project first, and both workers share one cwd — so a
+// simultaneous restart (a `pm2 resurrect`, a host reboot, `pm2 restart all`) put
+// two compilers on the same `cache/compile-cache.json`. One renamed the temp
+// file first and the other died on the ENOENT, which took the keeper down three
+// times before this flag.
+//
+// Neither worker reads an artifact: both carry their ABI inline as a string
+// array and reach the chain through their own JsonRpcProvider. The build was
+// buying them nothing and costing a race, so skip it. Contract changes reach
+// these processes through a deploy and `deployments/markets.json`, never
+// through a restart.
+const NO_COMPILE = "--no-compile";
+
 const common = {
   cwd: "/root/hashswap",
   script: HARDHAT,
@@ -48,14 +62,14 @@ module.exports = {
     {
       ...common,
       name: "hashswap-keeper",
-      args: "run scripts/keeper.ts --network sepolia",
+      args: `run ${NO_COMPILE} scripts/keeper.ts --network sepolia`,
       out_file: "/root/.pm2/logs/hashswap-keeper-out.log",
       error_file: "/root/.pm2/logs/hashswap-keeper-error.log",
     },
     {
       ...common,
       name: "hashswap-maker",
-      args: "run scripts/maker.ts --network sepolia",
+      args: `run ${NO_COMPILE} scripts/maker.ts --network sepolia`,
       out_file: "/root/.pm2/logs/hashswap-maker-out.log",
       error_file: "/root/.pm2/logs/hashswap-maker-error.log",
     },
