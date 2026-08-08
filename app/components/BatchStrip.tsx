@@ -1,7 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import { fmt, type Session } from "@/lib/hashswap";
 import type { BatchLimits, BatchView } from "@/lib/useBatch";
+import { BatchExplainer } from "./BatchExplainer";
 
 const STATUS = ["Collecting", "Clearing", "Settled", "Cancelled"];
 
@@ -33,6 +35,10 @@ export function BatchStrip({
   secondsLeft: number;
   settlementSecondsLeft: number;
 }) {
+  // Above the early return — this component bails out before rendering when the
+  // session or batch is still loading, and a conditional hook would break.
+  const [explaining, setExplaining] = useState(false);
+
   if (!session || !batch || !limits) {
     return (
       <div
@@ -63,8 +69,36 @@ export function BatchStrip({
               · refunds in {formatWait(settlementSecondsLeft)}
             </span>
           )}
+          {/* Sits with the status rather than the header: it is the status
+              wording that needs explaining, not the batch number. */}
+          <button
+            className="info-dot"
+            onClick={() => setExplaining(true)}
+            aria-label="How a batch settles"
+            aria-haspopup="dialog"
+            aria-expanded={explaining}
+          >
+            {/* Tight viewBox on purpose: the glyph has ~13px of interior to
+                fill, so a 24-unit box would render the stem barely 2px tall. */}
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <circle cx="6" cy="2.9" r="0.95" fill="currentColor" />
+              <path
+                d="M6 5.3v3.9"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
         </span>
       </div>
+
+      <BatchExplainer
+        open={explaining}
+        onClose={() => setExplaining(false)}
+        limits={limits}
+        status={batch.status}
+      />
 
       <div className="meter">
         {Array.from({ length: limits.max }).map((_, i) => (
